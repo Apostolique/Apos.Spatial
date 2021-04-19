@@ -29,7 +29,7 @@ namespace Apos.Spatial {
             _queue = new PriorityQueue(new int[AABB_TREE_STACK_QUERY_CAPACITY], new float[AABB_TREE_STACK_QUERY_CAPACITY], AABB_TREE_STACK_QUERY_CAPACITY);
         }
 
-        public int Add(RectangleF aabb, T? item) {
+        public int Add(RectangleF aabb, T item) {
             // Make a new node.
             aabb = Expand(aabb, AABB_TREE_EXPAND_CONSTANT);
             int newIndex = SPopFreelist(aabb, item);
@@ -123,7 +123,7 @@ namespace Apos.Spatial {
                 return false;
             }
 
-            T? item = _tree.Items[leaf];
+            T item = _tree.Items[leaf]!;
             Remove(leaf);
             Add(Expand(aabb, AABB_TREE_EXPAND_CONSTANT), item);
 
@@ -157,7 +157,7 @@ namespace Apos.Spatial {
                 }
             }
 
-            T? item = _tree.Items[leaf];
+            T item = _tree.Items[leaf]!;
             Remove(leaf);
             Add(aabb, item);
 
@@ -333,7 +333,7 @@ namespace Apos.Spatial {
             }
         }
 
-        private int SPopFreelist(RectangleF aabb, T? item = default(T?)) {
+        private int SPopFreelist(RectangleF aabb, T? item = null) {
             int newIndex = _tree.Freelist;
             if (newIndex == AABB_TREE_NULL_NODE_INDEX) {
                 int newCapacity = _tree.NodeCapacity * 2;
@@ -563,7 +563,7 @@ namespace Apos.Spatial {
                     if (_isDone) {
                         throw new InvalidOperationException();
                     }
-                    return _current;
+                    return _current!;
                 }
             }
 
@@ -627,7 +627,7 @@ namespace Apos.Spatial {
                     if (_isDone) {
                         throw new InvalidOperationException();
                     }
-                    return _current;
+                    return _current!;
                 }
             }
 
