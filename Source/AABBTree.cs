@@ -29,37 +29,6 @@ namespace Apos.Spatial {
             _queue = new PriorityQueue(new int[AABB_TREE_STACK_QUERY_CAPACITY], new float[AABB_TREE_STACK_QUERY_CAPACITY], AABB_TREE_STACK_QUERY_CAPACITY);
         }
 
-        public struct AABBTreeT {
-            public AABBTreeT(int initialCapacity = 0) {
-                if (initialCapacity == 0) initialCapacity = 64;
-                Nodes = new NodeT[initialCapacity];
-                AABBs = new RectangleF[initialCapacity];
-                Items = new T?[initialCapacity];
-                Root = AABB_TREE_NULL_NODE_INDEX;
-                Freelist = 0;
-                NodeCapacity = initialCapacity;
-                NodeCount = 0;
-
-                for (int i = 0; i < Nodes.Length - 1; i++) Nodes[i].IndexA = i + 1;
-                Nodes[Nodes.Length - 1].IndexA = AABB_TREE_NULL_NODE_INDEX;
-            }
-
-            public struct NodeT {
-                public int IndexA;
-                public int IndexB;
-                public int IndexParent;
-                public int Height;
-            }
-
-            public int Root;
-            public int Freelist;
-            public int NodeCapacity;
-            public int NodeCount;
-            public NodeT[] Nodes;
-            public RectangleF[] AABBs;
-            public T?[] Items;
-        }
-
         public int Add(RectangleF aabb, T? item) {
             // Make a new node.
             aabb = Expand(aabb, AABB_TREE_EXPAND_CONSTANT);
@@ -468,7 +437,38 @@ namespace Apos.Spatial {
             return !(d0 || d1 || d2 || d3);
         }
 
-        public struct PriorityQueue {
+        private struct AABBTreeT {
+            public AABBTreeT(int initialCapacity = 0) {
+                if (initialCapacity == 0) initialCapacity = 64;
+                Nodes = new NodeT[initialCapacity];
+                AABBs = new RectangleF[initialCapacity];
+                Items = new T?[initialCapacity];
+                Root = AABB_TREE_NULL_NODE_INDEX;
+                Freelist = 0;
+                NodeCapacity = initialCapacity;
+                NodeCount = 0;
+
+                for (int i = 0; i < Nodes.Length - 1; i++) Nodes[i].IndexA = i + 1;
+                Nodes[Nodes.Length - 1].IndexA = AABB_TREE_NULL_NODE_INDEX;
+            }
+
+            public struct NodeT {
+                public int IndexA;
+                public int IndexB;
+                public int IndexParent;
+                public int Height;
+            }
+
+            public int Root;
+            public int Freelist;
+            public int NodeCapacity;
+            public int NodeCount;
+            public NodeT[] Nodes;
+            public RectangleF[] AABBs;
+            public T?[] Items;
+        }
+
+        private struct PriorityQueue {
             public PriorityQueue(int[] indices, float[] costs, int capacity) {
                 _count = 0;
                 _capacity = capacity;
@@ -538,7 +538,6 @@ namespace Apos.Spatial {
             int[] _indices;
             float[] _costs;
         }
-
 
         private struct QueryRect : IEnumerator<T>, IEnumerable<T> {
             public QueryRect(AABBTreeT tree, RectangleF aabb) {
