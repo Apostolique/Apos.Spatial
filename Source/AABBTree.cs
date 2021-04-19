@@ -106,7 +106,9 @@ namespace Apos.Spatial {
             return newIndex;
         }
 
-        public void Remove(int leaf) {
+        public int Remove(int leaf) {
+            if (leaf == AABB_TREE_NULL_NODE_INDEX) return AABB_TREE_NULL_NODE_INDEX;
+
             int index = leaf;
             if (_tree.Root == index) {
                 _tree.Root = AABB_TREE_NULL_NODE_INDEX;
@@ -139,6 +141,8 @@ namespace Apos.Spatial {
                 SPushFreelist(indexParent);
             }
             SPushFreelist(index);
+
+            return AABB_TREE_NULL_NODE_INDEX;
         }
         public void Clear(int initialCapacity = 64) {
             _tree = new AABBTreeT(initialCapacity);
