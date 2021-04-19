@@ -23,12 +23,26 @@ using Microsoft.Xna.Framework;
 using MonoGame.Extended;
 
 namespace Apos.Spatial {
+    /// <summary>
+    /// An aabb tree is a dynamic partition data structure. It allows you to efficiently query the space in a game world.
+    /// </summary>
+    /// <typeparam name="T">Type of objects to add to the tree.</typeparam>
     public class AABBTree<T> : IEnumerable<T> where T : class {
+        /// <summary>
+        /// Creates a new tree.
+        /// </summary>
+        /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
         public AABBTree(int initialCapacity = 64) {
             _tree = new AABBTreeT(initialCapacity);
             _queue = new PriorityQueue(new int[AABB_TREE_STACK_QUERY_CAPACITY], new float[AABB_TREE_STACK_QUERY_CAPACITY], AABB_TREE_STACK_QUERY_CAPACITY);
         }
 
+        /// <summary>
+        /// Adds a new leaf to the tree, and rebalances as necessary.
+        /// </summary>
+        /// <param name="aabb">An axis aligned bounding box for the item.</param>
+        /// <param name="item">The item to add to the tree.</param>
+        /// <returns>The item's leaf. Use this to update or remove the item later.</returns>
         public int Add(RectangleF aabb, T item) {
             // Make a new node.
             aabb = Expand(aabb, AABB_TREE_EXPAND_CONSTANT);
@@ -72,9 +86,15 @@ namespace Apos.Spatial {
                 SRefitHierarchy(parentIndex);
             }
 
+            _version++;
+
             return newIndex;
         }
 
+        /// <summary>
+        /// Removes a leaf from the tree, and rebalances as necessary.
+        /// </summary>
+        /// <returns>-1 since the leaf is no longer in the tree.</returns>
         public int Remove(int leaf) {
             if (leaf == AABB_TREE_NULL_NODE_INDEX) return AABB_TREE_NULL_NODE_INDEX;
 
@@ -111,12 +131,27 @@ namespace Apos.Spatial {
             }
             SPushFreelist(index);
 
+            _version++;
+
             return AABB_TREE_NULL_NODE_INDEX;
         }
+        /// <summary>
+        /// Clears the whole tree.
+        /// </summary>
+        /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
         public void Clear(int initialCapacity = 64) {
             _tree = new AABBTreeT(initialCapacity);
+            _version++;
         }
 
+        /// <summary>
+        /// Use this function when an aabb needs to be updated. Leafs need to be updated whenever the shape
+        /// inside the leaf's aabb moves. Internally there are some optimizations so that the tree is only
+        /// adjusted if the aabb is moved enough.
+        /// </summary>
+        /// <param name="leaf">The leaf to update.</param>
+        /// <param name="aabb">The new aabb.</param>
+        /// <returns>Returns true if the leaf was updated, false otherwise.</returns>
         public bool Update(int leaf, RectangleF aabb) {
             if (Contains(_tree.AABBs[leaf], aabb)) {
                 _tree.AABBs[leaf] = aabb;
@@ -127,9 +162,21 @@ namespace Apos.Spatial {
             Remove(leaf);
             Add(Expand(aabb, AABB_TREE_EXPAND_CONSTANT), item);
 
+            _version++;
+
             return true;
         }
 
+        /// <summary>
+        /// Updates a leaf with a new aabb (if needed) with the new `aabb` and an `offset` for how far the new
+        /// aabb will be moving.
+        /// This function does more optimizations than `aabb_tree_update_leaf` by attempting to use the `offset`
+        /// to predict motion and avoid restructuring of the tree.
+        /// </summary>
+        /// <param name="leaf">The leaf to update.</param>
+        /// <param name="aabb">The new aabb.</param>
+        /// <param name="offset">An offset that represents the direction the aabb is moving in.</param>
+        /// <returns>Returns true if the leaf was updated, false otherwise.</returns>
         public bool Move(int leaf, RectangleF aabb, Vector2 offset) {
             aabb = Expand(aabb, AABB_TREE_EXPAND_CONSTANT);
             Vector2 delta = offset * AABB_TREE_MOVE_CONSTANT;
@@ -161,28 +208,51 @@ namespace Apos.Spatial {
             Remove(leaf);
             Add(aabb, item);
 
+            _version++;
+
             return true;
         }
 
+        /// <summary>
+        /// Returns the internal "expanded" aabb. This is useful for when you want to generate all pairs of
+        /// potential overlaps for a specific leaf. Just simply use `aabb_tree_query` on the the return value
+        /// of this function.
+        /// </summary>
+        /// <param name="leaf">The leaf to lookup.</param>
         public RectangleF GetAABB(int leaf) {
             return _tree.AABBs[leaf];
         }
+        /// <summary>
+        /// Returns the `item` from `Add`.
+        /// </summary>
+        /// <param name="leaf">The leaf to lookup.</param>
         public T? GetItem(int leaf) {
             return _tree.Items[leaf];
         }
 
+        /// <summary>
+        /// Returns every item in the tree. Used implicitely by foreach loops.
+        /// </summary>
         public IEnumerator<T> GetEnumerator() {
-            return new QueryAll(_tree);
+            return new QueryAll(this);
         }
         IEnumerator IEnumerable.GetEnumerator() {
-            return new QueryAll(_tree);
+            return new QueryAll(this);
         }
 
+        /// <summary>
+        /// Finds all items overlapping the Vector2 `v`.
+        /// </summary>
+        /// <param name="v">The position to query.</param>
         public IEnumerable<T> Query(Vector2 v) {
-            return new QueryRect(_tree, new RectangleF(v.X, v.Y, 0, 0));
+            return new QueryRect(this, new RectangleF(v.X, v.Y, 0, 0));
         }
+        /// <summary>
+        /// Finds all items overlapping the Vector2 `aabb`.
+        /// </summary>
+        /// <param name="aabb">The aabb to query.</param>
         public IEnumerable<T> Query(RectangleF aabb) {
-            return new QueryRect(_tree, aabb);
+            return new QueryRect(this, aabb);
         }
 
         private int SBalance(int indexA) {
@@ -533,27 +603,29 @@ namespace Apos.Spatial {
                 _costs[indexB] = fval;
             }
 
-            int _count;
-            int _capacity;
-            int[] _indices;
-            float[] _costs;
+            private int _count;
+            private int _capacity;
+            private int[] _indices;
+            private float[] _costs;
         }
 
         private struct QueryRect : IEnumerator<T>, IEnumerable<T> {
-            public QueryRect(AABBTreeT tree, RectangleF aabb) {
-                _tree = tree;
+            public QueryRect(AABBTree<T> at, RectangleF aabb) {
+                _at = at;
                 _aabb = aabb;
-                if (_tree.Root != AABB_TREE_NULL_NODE_INDEX) {
+                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
                     _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
                     _sp = 1;
-                    _indexStack[0] = _tree.Root;
+                    _indexStack[0] = _at._tree.Root;
                     _isDone = false;
                 } else {
                     _indexStack = null!;
                     _sp = 0;
                     _isDone = true;
                 }
+                _isStarted = false;
                 _current = default!;
+                _version = _at._version;
             }
 
             public T Current => _current;
@@ -561,7 +633,7 @@ namespace Apos.Spatial {
             object IEnumerator.Current {
                 get {
                     if (_isDone) {
-                        throw new InvalidOperationException();
+                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
                     }
                     return _current!;
                 }
@@ -570,17 +642,23 @@ namespace Apos.Spatial {
             public void Dispose() { }
 
             public bool MoveNext() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
+                _isStarted = true;
+
                 while (_sp > 0) {
                     int index = _indexStack[--_sp];
-                    RectangleF searchAABB = _tree.AABBs[index];
+                    RectangleF searchAABB = _at._tree.AABBs[index];
 
                     if (AABBTree<T>.Collide(_aabb, searchAABB)) {
-                        if (_tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                            _current = _tree.Items[index]!;
+                        if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
+                            _current = _at._tree.Items[index]!;
                             return true;
                         } else {
-                            _indexStack[_sp++] = _tree.Nodes[index].IndexA;
-                            _indexStack[_sp++] = _tree.Nodes[index].IndexB;
+                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
+                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
                         }
                     }
                 }
@@ -590,42 +668,51 @@ namespace Apos.Spatial {
             }
 
             public void Reset() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
                 _sp = 1;
                 _isDone = false;
+                _isStarted = false;
             }
 
             public IEnumerator<T> GetEnumerator() => this;
             IEnumerator IEnumerable.GetEnumerator() => this;
 
-            AABBTreeT _tree;
-            RectangleF _aabb;
-            int[] _indexStack;
-            int _sp;
-            T _current;
-            bool _isDone;
+            private AABBTree<T> _at;
+            private RectangleF _aabb;
+            private int[] _indexStack;
+            private int _sp;
+            private T _current;
+            private bool _isDone;
+            private bool _isStarted;
+            private readonly int _version;
         }
         private struct QueryAll : IEnumerator<T>, IEnumerable<T> {
-            public QueryAll(AABBTreeT tree) {
-                _tree = tree;
-                if (_tree.Root != AABB_TREE_NULL_NODE_INDEX) {
+            public QueryAll(AABBTree<T> at) {
+                _at = at;
+                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
                     _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
                     _sp = 1;
-                    _indexStack[0] = _tree.Root;
+                    _indexStack[0] = _at._tree.Root;
                     _isDone = false;
                 } else {
                     _indexStack = null!;
                     _sp = 0;
                     _isDone = true;
                 }
+                _isStarted = false;
                 _current = default!;
+                _version = _at._version;
             }
 
             public T Current => _current;
 
             object IEnumerator.Current {
                 get {
-                    if (_isDone) {
-                        throw new InvalidOperationException();
+                    if (!_isStarted || _isDone) {
+                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
                     }
                     return _current!;
                 }
@@ -634,15 +721,21 @@ namespace Apos.Spatial {
             public void Dispose() { }
 
             public bool MoveNext() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
+                _isStarted = true;
+
                 while (_sp > 0) {
                     int index = _indexStack[--_sp];
 
-                    if (_tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                        _current = _tree.Items[index]!;
+                    if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
+                        _current = _at._tree.Items[index]!;
                         return true;
                     } else {
-                        _indexStack[_sp++] = _tree.Nodes[index].IndexA;
-                        _indexStack[_sp++] = _tree.Nodes[index].IndexB;
+                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
+                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
                     }
                 }
                 _isDone = true;
@@ -651,18 +744,25 @@ namespace Apos.Spatial {
             }
 
             public void Reset() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
                 _sp = 1;
                 _isDone = false;
+                _isStarted = false;
             }
 
             public IEnumerator<T> GetEnumerator() => this;
             IEnumerator IEnumerable.GetEnumerator() => this;
 
-            AABBTreeT _tree;
-            int[] _indexStack;
-            int _sp;
-            T _current;
-            bool _isDone;
+            private AABBTree<T> _at;
+            private int[] _indexStack;
+            private int _sp;
+            private T _current;
+            private bool _isDone;
+            private bool _isStarted;
+            private readonly int _version;
         }
 
         private const float AABB_TREE_EXPAND_CONSTANT = 2f;
@@ -672,5 +772,6 @@ namespace Apos.Spatial {
 
         private AABBTreeT _tree;
         private PriorityQueue _queue;
+        private int _version = 0;
     }
 }
