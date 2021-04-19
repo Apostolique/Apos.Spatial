@@ -165,7 +165,6 @@ namespace Apos.Spatial {
                 aabb.X += delta.X;
                 aabb.Width -= delta.X;
             } else {
-                aabb.X -= delta.X;
                 aabb.Width += delta.X;
             }
 
@@ -173,7 +172,6 @@ namespace Apos.Spatial {
                 aabb.Y += delta.Y;
                 aabb.Height -= delta.Y;
             } else {
-                aabb.Y -= delta.Y;
                 aabb.Height += delta.Y;
             }
 
