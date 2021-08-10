@@ -27,7 +27,7 @@ namespace Apos.Spatial {
     /// An aabb tree is a dynamic partition data structure. It allows you to efficiently query the space in a game world.
     /// </summary>
     /// <typeparam name="T">Type of objects to add to the tree.</typeparam>
-    public class AABBTree<T> : IEnumerable<T> where T : class {
+    public class AABBTree<T> : IEnumerable<T> {
         /// <summary>
         /// Creates a new tree.
         /// </summary>
@@ -226,7 +226,7 @@ namespace Apos.Spatial {
         /// Returns the `item` from `Add`.
         /// </summary>
         /// <param name="leaf">The leaf to lookup.</param>
-        public T? GetItem(int leaf) {
+        public T GetItem(int leaf) {
             return _tree.Items[leaf];
         }
 
@@ -403,7 +403,7 @@ namespace Apos.Spatial {
             }
         }
 
-        private int SPopFreelist(RectangleF aabb, T? item = null) {
+        private int SPopFreelist(RectangleF aabb, T item = default!) {
             int newIndex = _tree.Freelist;
             if (newIndex == AABB_TREE_NULL_NODE_INDEX) {
                 int newCapacity = _tree.NodeCapacity * 2;
@@ -437,7 +437,7 @@ namespace Apos.Spatial {
 
         private void SPushFreelist(int index) {
             _tree.Nodes[index].IndexA = _tree.Freelist;
-            _tree.Items[index] = null;
+            _tree.Items[index] = default!;
             _tree.Freelist = index;
             _tree.NodeCount--;
         }
@@ -512,7 +512,7 @@ namespace Apos.Spatial {
                 if (initialCapacity == 0) initialCapacity = 64;
                 Nodes = new NodeT[initialCapacity];
                 AABBs = new RectangleF[initialCapacity];
-                Items = new T?[initialCapacity];
+                Items = new T[initialCapacity];
                 Root = AABB_TREE_NULL_NODE_INDEX;
                 Freelist = 0;
                 NodeCapacity = initialCapacity;
@@ -535,7 +535,7 @@ namespace Apos.Spatial {
             public int NodeCount;
             public NodeT[] Nodes;
             public RectangleF[] AABBs;
-            public T?[] Items;
+            public T[] Items;
         }
 
         private struct PriorityQueue {
@@ -624,15 +624,15 @@ namespace Apos.Spatial {
                     _isDone = true;
                 }
                 _isStarted = false;
-                _current = default!;
                 _version = _at._version;
+                _current = default;
             }
 
-            public T Current => _current;
+            public T Current => _current!;
 
             object IEnumerator.Current {
                 get {
-                    if (_isDone) {
+                    if (!_isStarted || _isDone) {
                         throw new InvalidOperationException("Enumeration has either not started or has already finished.");
                     }
                     return _current!;
@@ -654,7 +654,7 @@ namespace Apos.Spatial {
 
                     if (AABBTree<T>.Collide(_aabb, searchAABB)) {
                         if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                            _current = _at._tree.Items[index]!;
+                            _current = _at._tree.Items[index];
                             return true;
                         } else {
                             _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
@@ -663,7 +663,7 @@ namespace Apos.Spatial {
                     }
                 }
                 _isDone = true;
-                _current = default!;
+                _current = default;
                 return false;
             }
 
@@ -675,6 +675,7 @@ namespace Apos.Spatial {
                 _sp = 1;
                 _isDone = false;
                 _isStarted = false;
+                _current = default;
             }
 
             public IEnumerator<T> GetEnumerator() => this;
@@ -684,7 +685,7 @@ namespace Apos.Spatial {
             private RectangleF _aabb;
             private int[] _indexStack;
             private int _sp;
-            private T _current;
+            private T? _current;
             private bool _isDone;
             private bool _isStarted;
             private readonly int _version;
@@ -703,11 +704,11 @@ namespace Apos.Spatial {
                     _isDone = true;
                 }
                 _isStarted = false;
-                _current = default!;
                 _version = _at._version;
+                _current = default;
             }
 
-            public T Current => _current;
+            public T Current => _current!;
 
             object IEnumerator.Current {
                 get {
@@ -731,7 +732,7 @@ namespace Apos.Spatial {
                     int index = _indexStack[--_sp];
 
                     if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                        _current = _at._tree.Items[index]!;
+                        _current = _at._tree.Items[index];
                         return true;
                     } else {
                         _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
@@ -739,7 +740,7 @@ namespace Apos.Spatial {
                     }
                 }
                 _isDone = true;
-                _current = default!;
+                _current = default;
                 return false;
             }
 
@@ -751,6 +752,7 @@ namespace Apos.Spatial {
                 _sp = 1;
                 _isDone = false;
                 _isStarted = false;
+                _current = default;
             }
 
             public IEnumerator<T> GetEnumerator() => this;
@@ -759,7 +761,7 @@ namespace Apos.Spatial {
             private AABBTree<T> _at;
             private int[] _indexStack;
             private int _sp;
-            private T _current;
+            private T? _current;
             private bool _isDone;
             private bool _isStarted;
             private readonly int _version;
