@@ -44,51 +44,8 @@ namespace Apos.Spatial {
         /// <param name="item">The item to add to the tree.</param>
         /// <returns>The item's leaf. Use this to update or remove the item later.</returns>
         public int Add(RectangleF aabb, T item) {
-            // Make a new node.
-            aabb = Expand(aabb, AABB_TREE_EXPAND_CONSTANT);
-            int newIndex = SPopFreelist(aabb, item);
-            int searchIndex = _tree.Root;
-
-            // Empty tree, make new root.
-            if (searchIndex == AABB_TREE_NULL_NODE_INDEX) {
-                _tree.Root = newIndex;
-            } else {
-                searchIndex = SBranchAndBoundFindOptimalSibling(aabb);
-
-                // Make new branch node.
-                int branchIndex = SPopFreelist(RectangleF.Union(aabb, _tree.AABBs[searchIndex]));
-                ref AABBTreeT.NodeT branch = ref _tree.Nodes[branchIndex];
-                int parentIndex = _tree.Nodes[searchIndex].IndexParent;
-
-                if (parentIndex == AABB_TREE_NULL_NODE_INDEX) {
-                    _tree.Root = branchIndex;
-                } else {
-                    ref AABBTreeT.NodeT parent = ref _tree.Nodes[parentIndex];
-
-                    // Hookup parent to the new branch.
-                    if (parent.IndexA == searchIndex) {
-                        parent.IndexA = branchIndex;
-                    } else {
-                        parent.IndexB = branchIndex;
-                    }
-                }
-
-                // Assign branch children and parent.
-                branch.IndexA = searchIndex;
-                branch.IndexB = newIndex;
-                branch.IndexParent = parentIndex;
-                branch.Height = _tree.Nodes[searchIndex].Height + 1;
-
-                // Assign parent pointers for new the leaf pair, and heights.
-                _tree.Nodes[searchIndex].IndexParent = branchIndex;
-                _tree.Nodes[newIndex].IndexParent = branchIndex;
-
-                SRefitHierarchy(parentIndex);
-            }
-
-            _version++;
-
-            return newIndex;
+            // Expand aabb before adding.
+            return InternalAdd(Expand(aabb, AABB_TREE_EXPAND_CONSTANT), item);
         }
 
         /// <summary>
@@ -160,7 +117,7 @@ namespace Apos.Spatial {
 
             T item = _tree.Items[leaf]!;
             Remove(leaf);
-            Add(Expand(aabb, AABB_TREE_EXPAND_CONSTANT), item);
+            Add(aabb, item);
 
             _version++;
 
@@ -206,7 +163,7 @@ namespace Apos.Spatial {
 
             T item = _tree.Items[leaf]!;
             Remove(leaf);
-            Add(aabb, item);
+            InternalAdd(aabb, item);
 
             _version++;
 
@@ -255,6 +212,52 @@ namespace Apos.Spatial {
             return new QueryRect(this, aabb);
         }
 
+        private int InternalAdd(RectangleF aabb, T item) {
+            // Make a new node.
+            int newIndex = SPopFreelist(aabb, item);
+            int searchIndex = _tree.Root;
+
+            // Empty tree, make new root.
+            if (searchIndex == AABB_TREE_NULL_NODE_INDEX) {
+                _tree.Root = newIndex;
+            } else {
+                searchIndex = SBranchAndBoundFindOptimalSibling(aabb);
+
+                // Make new branch node.
+                int branchIndex = SPopFreelist(RectangleF.Union(aabb, _tree.AABBs[searchIndex]));
+                ref AABBTreeT.NodeT branch = ref _tree.Nodes[branchIndex];
+                int parentIndex = _tree.Nodes[searchIndex].IndexParent;
+
+                if (parentIndex == AABB_TREE_NULL_NODE_INDEX) {
+                    _tree.Root = branchIndex;
+                } else {
+                    ref AABBTreeT.NodeT parent = ref _tree.Nodes[parentIndex];
+
+                    // Hookup parent to the new branch.
+                    if (parent.IndexA == searchIndex) {
+                        parent.IndexA = branchIndex;
+                    } else {
+                        parent.IndexB = branchIndex;
+                    }
+                }
+
+                // Assign branch children and parent.
+                branch.IndexA = searchIndex;
+                branch.IndexB = newIndex;
+                branch.IndexParent = parentIndex;
+                branch.Height = _tree.Nodes[searchIndex].Height + 1;
+
+                // Assign parent pointers for new the leaf pair, and heights.
+                _tree.Nodes[searchIndex].IndexParent = branchIndex;
+                _tree.Nodes[newIndex].IndexParent = branchIndex;
+
+                SRefitHierarchy(parentIndex);
+            }
+
+            _version++;
+
+            return newIndex;
+        }
         private int SBalance(int indexA) {
             //      a
             //    /   \
