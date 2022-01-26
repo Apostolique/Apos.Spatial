@@ -38,6 +38,11 @@ namespace Apos.Spatial {
         }
 
         /// <summary>
+        /// Amount of nodes in the tree.
+        /// </summary>
+        public int Count => _tree.NodeCount;
+
+        /// <summary>
         /// Adds a new leaf to the tree, and rebalances as necessary.
         /// </summary>
         /// <param name="aabb">An axis aligned bounding box for the item.</param>
