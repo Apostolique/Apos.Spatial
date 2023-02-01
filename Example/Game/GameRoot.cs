@@ -28,10 +28,11 @@ namespace GameProject {
 
             InputHelper.Setup(this);
 
-            _a = new Entity(0, new RectangleF(0, 0, 20, 20));
-
             _aabbTree = new AABBTree<Entity>();
-            _a.Leaf = _aabbTree.Add(_a.Rect, _a);
+
+            for (int i = 0; i < 20; i++) {
+                CreateNew();
+            }
         }
 
         protected override void Update(GameTime gameTime) {
@@ -49,40 +50,14 @@ namespace GameProject {
             _held = _mouseLeft.Held();
 
             if (_delete.Pressed()) {
-                _aabbTree.Remove(_a.Leaf);
+                var rect = CreateRect(_start, _end);
+                foreach (var e in _aabbTree.Query(rect).ToList()) {
+                    _aabbTree.Remove(e.Leaf);
+                }
             }
 
             if (_new.Pressed()) {
-                float minX = 10;
-                float maxX = 500;
-                float minY = 10;
-                float maxY = 500;
-                var r = new RectangleF(new Vector2(_random.NextSingle(minX, maxX), _random.NextSingle(minY, maxY)), new Vector2(_random.NextSingle(50, 100), _random.NextSingle(50, 100)));
-                Entity b = new Entity(_index++, r);
-
-                b.Leaf = _aabbTree.Add(b.Rect, b);
-            }
-
-            if (_left.Held()) {
-                _a.Rect = new RectangleF(_a.Rect.X - 2, _a.Rect.Y, _a.Rect.Width, _a.Rect.Height);
-                _aabbTree.Update(_a.Leaf, _a.Rect);
-            }
-            if (_right.Held()) {
-                _a.Rect = new RectangleF(_a.Rect.X + 2, _a.Rect.Y, _a.Rect.Width, _a.Rect.Height);
-                _aabbTree.Update(_a.Leaf, _a.Rect);
-            }
-            if (_up.Held()) {
-                _a.Rect = new RectangleF(_a.Rect.X, _a.Rect.Y - 2, _a.Rect.Width, _a.Rect.Height);
-                _aabbTree.Update(_a.Leaf, _a.Rect);
-            }
-            if (_down.Held()) {
-                _a.Rect = new RectangleF(_a.Rect.X, _a.Rect.Y + 2, _a.Rect.Width, _a.Rect.Height);
-                _aabbTree.Update(_a.Leaf, _a.Rect);
-            }
-            if (_mouseRight.Held()) {
-                var xy = InputHelper.NewMouse.Position.ToVector2();
-                _a.Rect = new RectangleF(xy.X, xy.Y, _a.Rect.Width, _a.Rect.Height);
-                _aabbTree.Update(_a.Leaf, _a.Rect);
+                CreateNew();
             }
 
             InputHelper.UpdateCleanup();
@@ -123,12 +98,20 @@ namespace GameProject {
             return new RectangleF(left, top, right - left, bottom - top);
         }
 
-        Vector2 _start;
-        Vector2 _end;
-        bool _held = false;
+        private void CreateNew() {
+            float minX = 10;
+            float maxX = 500;
+            float minY = 10;
+            float maxY = 500;
+            var r = new RectangleF(new Vector2(_random.NextSingle(minX, maxX), _random.NextSingle(minY, maxY)), new Vector2(_random.NextSingle(50, 100), _random.NextSingle(50, 100)));
+            Entity b = new Entity(_index++, r);
+            b.Leaf = _aabbTree.Add(b.Rect, b);
+        }
 
         GraphicsDeviceManager _graphics;
         SpriteBatch _s;
+
+        AABBTree<Entity> _aabbTree;
 
         ICondition _quit =
             new AnyCondition(
@@ -136,19 +119,14 @@ namespace GameProject {
                 new GamePadCondition(GamePadButton.Back, 0)
             );
         ICondition _mouseLeft = new MouseCondition(MouseButton.LeftButton);
-        ICondition _mouseRight = new MouseCondition(MouseButton.RightButton);
-        ICondition _left = new KeyboardCondition(Keys.Left);
-        ICondition _up = new KeyboardCondition(Keys.Up);
-        ICondition _right = new KeyboardCondition(Keys.Right);
-        ICondition _down = new KeyboardCondition(Keys.Down);
-        ICondition _new = new KeyboardCondition(Keys.N);
+        ICondition _new = new AnyCondition(new KeyboardCondition(Keys.Enter));
         ICondition _delete = new KeyboardCondition(Keys.Delete);
-
-        AABBTree<Entity> _aabbTree;
-
-        Entity _a;
 
         Random _random;
         uint _index = 1;
+
+        Vector2 _start;
+        Vector2 _end;
+        bool _held = false;
     }
 }
