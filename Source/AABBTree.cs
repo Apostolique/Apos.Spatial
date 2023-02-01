@@ -499,7 +499,7 @@ namespace Apos.Spatial {
         }
 
         private static RectangleF Expand(RectangleF aabb, float v) {
-            return new RectangleF(aabb.Left - v, aabb.Top - v, aabb.Width + v, aabb.Height + v);
+            return new RectangleF(aabb.Left - v, aabb.Top - v, aabb.Width + v * 2f, aabb.Height + v * 2f);
         }
         private static float SurfaceArea(RectangleF bb) {
             return bb.Width * bb.Height;
