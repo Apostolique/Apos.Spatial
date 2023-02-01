@@ -32,11 +32,36 @@ namespace Apos.Spatial {
         /// Creates a new tree.
         /// </summary>
         /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
-        public AABBTree(int initialCapacity = 64) {
+        /// <param name="expandConstant">It expands the items that are added so that they don't need to be updated as often. Defaults to 2f.</param>
+        /// <param name="moveConstant">It expands the items that are moved so that they don't need to be updated as much. Defaults to 4f.</param>
+        public AABBTree(int initialCapacity = 64, float expandConstant = 2f, float moveConstant = 4f) {
+            _aabbTreeExpandConstant = expandConstant;
+            _aabbTreeMoveConstant = moveConstant;
+
             _tree = new AABBTreeT(initialCapacity);
             _queue = new PriorityQueue(new int[AABB_TREE_STACK_QUERY_CAPACITY], new float[AABB_TREE_STACK_QUERY_CAPACITY], AABB_TREE_STACK_QUERY_CAPACITY);
         }
 
+        /// <summary>
+        /// Used for the broad phase search.
+        /// It expands the items that are added so that they don't need to be updated as often.
+        /// </summary>
+        public float ExpandConstant {
+            get => _aabbTreeExpandConstant;
+            set {
+                _aabbTreeExpandConstant = value;
+            }
+        }
+        /// <summary>
+        /// Used for the broad phase search.
+        /// It expands the items that are moved so that they don't need to be updated as much.
+        /// </summary>
+        public float MoveConstant {
+            get => _aabbTreeMoveConstant;
+            set {
+                _aabbTreeMoveConstant = value;
+            }
+        }
         /// <summary>
         /// Amount of nodes in the tree.
         /// </summary>
@@ -50,7 +75,7 @@ namespace Apos.Spatial {
         /// <returns>The item's leaf. Use this to update or remove the item later.</returns>
         public int Add(RectangleF aabb, T item) {
             // Expand aabb before adding.
-            return InternalAdd(Expand(aabb, AABB_TREE_EXPAND_CONSTANT), item);
+            return InternalAdd(Expand(aabb, _aabbTreeExpandConstant), item);
         }
 
         /// <summary>
@@ -140,8 +165,8 @@ namespace Apos.Spatial {
         /// <param name="offset">An offset that represents the direction the aabb is moving in.</param>
         /// <returns>Returns true if the leaf was updated, false otherwise.</returns>
         public bool Move(int leaf, RectangleF aabb, Vector2 offset) {
-            aabb = Expand(aabb, AABB_TREE_EXPAND_CONSTANT);
-            Vector2 delta = offset * AABB_TREE_MOVE_CONSTANT;
+            aabb = Expand(aabb, _aabbTreeExpandConstant);
+            Vector2 delta = offset * _aabbTreeMoveConstant;
 
             if (delta.X < 0) {
                 aabb.X += delta.X;
@@ -159,7 +184,7 @@ namespace Apos.Spatial {
 
             RectangleF oldAABB = _tree.AABBs[leaf];
             if (Contains(oldAABB, aabb)) {
-                RectangleF bigAABB = Expand(aabb, AABB_TREE_MOVE_CONSTANT);
+                RectangleF bigAABB = Expand(aabb, _aabbTreeMoveConstant);
                 bool oldAABBIsNotWayTooHuge = Contains(bigAABB, oldAABB);
                 if (oldAABBIsNotWayTooHuge) {
                     return false;
@@ -775,10 +800,11 @@ namespace Apos.Spatial {
             private readonly int _version;
         }
 
-        private const float AABB_TREE_EXPAND_CONSTANT = 2f;
+        private float _aabbTreeExpandConstant;
+        private float _aabbTreeMoveConstant;
+
         private const int AABB_TREE_STACK_QUERY_CAPACITY = 256;
         private const int AABB_TREE_NULL_NODE_INDEX = -1;
-        private const float AABB_TREE_MOVE_CONSTANT = 4f;
 
         private AABBTreeT _tree;
         private PriorityQueue _queue;
