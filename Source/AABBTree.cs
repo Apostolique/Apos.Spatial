@@ -218,7 +218,7 @@ namespace Apos.Spatial {
         }
 
         /// <summary>
-        /// Returns every item in the tree. Used implicitely by foreach loops.
+        /// Returns every item in the tree. Used implicitly by foreach loops.
         /// </summary>
         public IEnumerator<T> GetEnumerator() {
             return new QueryAll(this);
