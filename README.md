@@ -3,7 +3,7 @@ Spatial partitioning library for MonoGame.
 
 ## Thanks!
 
-Special thanks to [RandyGaul](https://github.com/RandyGaul) for providing me with the AABBTree algorithm.
+Special thanks to [RandyGaul](https://github.com/RandyGaul) for providing me the AABBTree algorithm.
 
 ## Documentation
 
