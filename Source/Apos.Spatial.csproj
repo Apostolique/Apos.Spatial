@@ -6,22 +6,25 @@
     <Nullable>enable</Nullable>
 
     <PackageId>Apos.Spatial</PackageId>
-    <RootNamespace>Apos.Spatial</RootNamespace>
     <Description>Spatial partitioning library for MonoGame.</Description>
+    <PackageTags>gamedev;monogame;spatial</PackageTags>
+
     <Authors>Jean-David Moisan</Authors>
     <Company>Vyne Enterprise Inc.</Company>
-    <Copyright>Copyright 2021</Copyright>
-    <PackageTags>gamedev;monogame;spatial</PackageTags>
-    <PackageIcon>Icon.png</PackageIcon>
+    <Copyright>Copyright 2023</Copyright>
+
     <RepositoryUrl>https://github.com/Apostolique/Apos.Spatial</RepositoryUrl>
     <PackageProjectUrl>https://github.com/Apostolique/Apos.Spatial</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <RepositoryType>git</RepositoryType>
+
+    <PackageIcon>Icon.png</PackageIcon>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <NoWarn>1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
