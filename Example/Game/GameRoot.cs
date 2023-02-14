@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Linq;
 using Apos.Input;
+using Apos.Shapes;
 using Apos.Spatial;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
@@ -11,6 +12,7 @@ namespace GameProject {
     public class GameRoot : Game {
         public GameRoot() {
             _graphics = new GraphicsDeviceManager(this);
+            _graphics.GraphicsProfile = GraphicsProfile.HiDef;
             IsMouseVisible = true;
             Content.RootDirectory = "Content";
         }
@@ -22,7 +24,7 @@ namespace GameProject {
         }
 
         protected override void LoadContent() {
-            _s = new SpriteBatch(GraphicsDevice);
+            _sb = new ShapeBatch(GraphicsDevice, Content);
 
             _random = new Random();
 
@@ -30,7 +32,7 @@ namespace GameProject {
 
             _aabbTree = new AABBTree<Entity>();
 
-            for (int i = 0; i < 20; i++) {
+            for (int i = 0; i < 2; i++) {
                 CreateNew();
             }
         }
@@ -41,16 +43,16 @@ namespace GameProject {
             if (_quit.Pressed())
                 Exit();
             if (_mouseLeft.Held() && !_held) {
-                _start = InputHelper.NewMouse.Position.ToVector2();
-                _end = _start;
+                _startRect = InputHelper.NewMouse.Position.ToVector2();
+                _endRect = _startRect;
             }
             if (_mouseLeft.HeldOnly()) {
-                _end = InputHelper.NewMouse.Position.ToVector2();
+                _endRect = InputHelper.NewMouse.Position.ToVector2();
             }
             _held = _mouseLeft.Held();
 
             if (_delete.Pressed()) {
-                var rect = CreateRect(_start, _end);
+                var rect = CreateRect(_startRect, _endRect);
                 foreach (var e in _aabbTree.Query(rect).ToList()) {
                     _aabbTree.Remove(e.Leaf);
                 }
@@ -60,6 +62,13 @@ namespace GameProject {
                 CreateNew();
             }
 
+            if (_placeStart.Held()) {
+                _start = InputHelper.NewMouse.Position.ToVector2();
+            }
+            if (_placeEnd.Held()) {
+                _end = InputHelper.NewMouse.Position.ToVector2();
+            }
+
             InputHelper.UpdateCleanup();
             base.Update(gameTime);
         }
@@ -67,24 +76,33 @@ namespace GameProject {
         protected override void Draw(GameTime gameTime) {
             GraphicsDevice.Clear(Color.Black);
 
-            _s.Begin();
+            _sb.Begin();
+            foreach (var rect in _aabbTree.DebugAllNodes()) {
+                _sb.BorderRectangle(rect.TopLeft, rect.Size, Color.White * 0.3f);
+            }
+
             foreach (var e in _aabbTree) {
-                _s.FillRectangle(e.Rect, Color.Red * 0.8f);
+                _sb.FillRectangle(e.Rect.TopLeft, e.Rect.Size, Color.Red * 0.8f);
             }
 
             if (_held) {
-                var rect = CreateRect(_start, _end);
+                var rect = CreateRect(_startRect, _endRect);
                 foreach (var e in _aabbTree.Query(rect)) {
-                    _s.FillRectangle(e.Rect, Color.Blue * 0.3f);
+                    _sb.FillRectangle(e.Rect.TopLeft, e.Rect.Size, Color.Blue * 0.3f);
                 }
-                _s.DrawRectangle(rect, Color.White, 1f);
+                _sb.BorderRectangle(rect.TopLeft, rect.Size, Color.White, 1f);
             } else {
                 var xy = InputHelper.NewMouse.Position.ToVector2();
                 foreach (var e in _aabbTree.Query(xy)) {
-                    _s.FillRectangle(e.Rect, Color.White * 0.3f);
+                    _sb.FillRectangle(e.Rect.TopLeft, e.Rect.Size, Color.White * 0.3f);
                 }
             }
-            _s.End();
+
+            _sb.FillLine(_start, _end, 0.5f, Color.White);
+            _sb.DrawCircle(_start, 4f, Color.Green, Color.White, 1f);
+            _sb.DrawCircle(_end, 4f, Color.Blue, Color.White, 1f);
+
+            _sb.End();
 
             base.Draw(gameTime);
         }
@@ -109,7 +127,7 @@ namespace GameProject {
         }
 
         GraphicsDeviceManager _graphics;
-        SpriteBatch _s;
+        ShapeBatch _sb;
 
         AABBTree<Entity> _aabbTree;
 
@@ -122,11 +140,17 @@ namespace GameProject {
         ICondition _new = new AnyCondition(new KeyboardCondition(Keys.Enter));
         ICondition _delete = new KeyboardCondition(Keys.Delete);
 
+        ICondition _placeStart = new AnyCondition(new KeyboardCondition(Keys.Q));
+        ICondition _placeEnd = new AnyCondition(new KeyboardCondition(Keys.E));
+
         Random _random;
         uint _index = 1;
 
+        Vector2 _startRect;
+        Vector2 _endRect;
+        bool _held = false;
+
         Vector2 _start;
         Vector2 _end;
-        bool _held = false;
     }
 }

@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -17,6 +17,7 @@
     <PackageReference Include="MonoGame.Content.Builder.Task" Version="3.8.1.303" />
     <PackageReference Include="MonoGame.Framework.WindowsDX" Version="3.8.1.303" />
     <PackageReference Include="Apos.Input" Version="2.4.2" />
+    <PackageReference Include="Apos.Shapes" Version="0.1.8" />
 
     <ProjectReference Include="../../../Source/Apos.Spatial.csproj">
       <NoWarn>CS1591</NoWarn>

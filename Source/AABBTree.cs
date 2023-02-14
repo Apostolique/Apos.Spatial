@@ -241,6 +241,19 @@ namespace Apos.Spatial {
         public IEnumerable<T> Query(RectangleF aabb) {
             return new QueryRect(this, aabb);
         }
+        /// <summary>
+        /// Mostly used for debugging. It returns all the `aabb` in the tree including parent nodes.
+        /// </summary>
+        /// <param name="aabb">The aabb to query.</param>
+        public IEnumerable<RectangleF> DebugNodes(RectangleF aabb) {
+            return new QueryNodes(this, aabb);
+        }
+        /// <summary>
+        /// Mostly used for debugging. It returns all the `aabb` in the tree including parent nodes.
+        /// </summary>
+        public IEnumerable<RectangleF> DebugAllNodes() {
+            return new QueryAllNodes(this);
+        }
 
         private int InternalAdd(RectangleF aabb, T item) {
             // Make a new node.
@@ -795,6 +808,167 @@ namespace Apos.Spatial {
             private int[] _indexStack;
             private int _sp;
             private T? _current;
+            private bool _isDone;
+            private bool _isStarted;
+            private readonly int _version;
+        }
+        private struct QueryNodes : IEnumerator<RectangleF>, IEnumerable<RectangleF> {
+            public QueryNodes(AABBTree<T> at, RectangleF aabb) {
+                _at = at;
+                _aabb = aabb;
+                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
+                    _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
+                    _sp = 1;
+                    _indexStack[0] = _at._tree.Root;
+                    _isDone = false;
+                } else {
+                    _indexStack = null!;
+                    _sp = 0;
+                    _isDone = true;
+                }
+                _isStarted = false;
+                _version = _at._version;
+                _current = default;
+            }
+
+            public RectangleF Current => _current!.Value;
+
+            object IEnumerator.Current {
+                get {
+                    if (!_isStarted || _isDone) {
+                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
+                    }
+                    return _current!;
+                }
+            }
+
+            public void Dispose() { }
+
+            public bool MoveNext() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
+                _isStarted = true;
+
+                while (_sp > 0) {
+                    int index = _indexStack[--_sp];
+                    RectangleF searchAABB = _at._tree.AABBs[index];
+
+                    if (AABBTree<T>.Collide(_aabb, searchAABB)) {
+                        if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
+                            _current = _at._tree.AABBs[index];
+                            return true;
+                        } else {
+                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
+                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
+                            _current = _at._tree.AABBs[index];
+                            return true;
+                        }
+                    }
+                }
+                _isDone = true;
+                _current = default;
+                return false;
+            }
+
+            public void Reset() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
+                _sp = 1;
+                _isDone = false;
+                _isStarted = false;
+                _current = default;
+            }
+
+            public IEnumerator<RectangleF> GetEnumerator() => this;
+            IEnumerator IEnumerable.GetEnumerator() => this;
+
+            private AABBTree<T> _at;
+            private RectangleF _aabb;
+            private int[] _indexStack;
+            private int _sp;
+            private RectangleF? _current;
+            private bool _isDone;
+            private bool _isStarted;
+            private readonly int _version;
+        }
+        private struct QueryAllNodes : IEnumerator<RectangleF>, IEnumerable<RectangleF> {
+            public QueryAllNodes(AABBTree<T> at) {
+                _at = at;
+                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
+                    _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
+                    _sp = 1;
+                    _indexStack[0] = _at._tree.Root;
+                    _isDone = false;
+                } else {
+                    _indexStack = null!;
+                    _sp = 0;
+                    _isDone = true;
+                }
+                _isStarted = false;
+                _version = _at._version;
+                _current = default;
+            }
+
+            public RectangleF Current => _current!.Value;
+
+            object IEnumerator.Current {
+                get {
+                    if (!_isStarted || _isDone) {
+                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
+                    }
+                    return _current!;
+                }
+            }
+
+            public void Dispose() { }
+
+            public bool MoveNext() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
+                _isStarted = true;
+
+                while (_sp > 0) {
+                    int index = _indexStack[--_sp];
+
+                    if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
+                        _current = _at._tree.AABBs[index];
+                        return true;
+                    } else {
+                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
+                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
+                        _current = _at._tree.AABBs[index];
+                        return true;
+                    }
+                }
+                _isDone = true;
+                _current = default;
+                return false;
+            }
+
+            public void Reset() {
+                if (_version != _at._version) {
+                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                }
+
+                _sp = 1;
+                _isDone = false;
+                _isStarted = false;
+                _current = default;
+            }
+
+            public IEnumerator<RectangleF> GetEnumerator() => this;
+            IEnumerator IEnumerable.GetEnumerator() => this;
+
+            private AABBTree<T> _at;
+            private int[] _indexStack;
+            private int _sp;
+            private RectangleF? _current;
             private bool _isDone;
             private bool _isStarted;
             private readonly int _version;
