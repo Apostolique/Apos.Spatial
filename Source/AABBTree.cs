@@ -202,7 +202,7 @@ namespace Apos.Spatial {
 
         /// <summary>
         /// Returns the internal "expanded" aabb. This is useful for when you want to generate all pairs of
-        /// potential overlaps for a specific leaf. Just simply use `aabb_tree_query` on the the return value
+        /// potential overlaps for a specific leaf. Just simply use `Query` on the the return value
         /// of this function.
         /// </summary>
         /// <param name="leaf">The leaf to lookup.</param>
