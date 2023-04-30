@@ -168,14 +168,14 @@ namespace Apos.Spatial {
             aabb = Expand(aabb, _aabbTreeExpandConstant);
             Vector2 delta = offset * _aabbTreeMoveConstant;
 
-            if (delta.X < 0) {
+            if (delta.X < 0f) {
                 aabb.X += delta.X;
                 aabb.Width -= delta.X;
             } else {
                 aabb.Width += delta.X;
             }
 
-            if (delta.Y < 0) {
+            if (delta.Y < 0f) {
                 aabb.Y += delta.Y;
                 aabb.Height -= delta.Y;
             } else {
@@ -232,7 +232,7 @@ namespace Apos.Spatial {
         /// </summary>
         /// <param name="v">The position to query.</param>
         public IEnumerable<T> Query(Vector2 v) {
-            return new QueryRect(this, new RectangleF(v.X, v.Y, 0, 0));
+            return new QueryRect(this, new RectangleF(v.X, v.Y, 0f, 0f));
         }
         /// <summary>
         /// Finds all items overlapping the Vector2 `aabb`.
@@ -501,7 +501,7 @@ namespace Apos.Spatial {
             float bestCost = float.MaxValue;
             int bestIndex = AABB_TREE_NULL_NODE_INDEX;
             int searchIndex = 0;
-            float searchDeltaCost = 0;
+            float searchDeltaCost = 0f;
             while (_queue.TryPop(ref searchIndex, ref searchDeltaCost)) {
                 // Track the best candidate so far.
                 RectangleF searchAABB = _tree.AABBs[searchIndex];
@@ -529,7 +529,7 @@ namespace Apos.Spatial {
         }
 
         private float STreeCost(int index) {
-            if (index == AABB_TREE_NULL_NODE_INDEX) return 0;
+            if (index == AABB_TREE_NULL_NODE_INDEX) return 0f;
             float costA = STreeCost(_tree.Nodes[index].IndexA);
             float costB = STreeCost(_tree.Nodes[index].IndexB);
             float myCost = SurfaceArea(_tree.AABBs[index]);
