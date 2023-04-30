@@ -157,7 +157,7 @@ namespace Apos.Spatial {
         /// <summary>
         /// Updates a leaf with a new aabb (if needed) with the new `aabb` and an `offset` for how far the new
         /// aabb will be moving.
-        /// This function does more optimizations than `aabb_tree_update_leaf` by attempting to use the `offset`
+        /// This function does more optimizations than `Update` by attempting to use the `offset`
         /// to predict motion and avoid restructuring of the tree.
         /// </summary>
         /// <param name="leaf">The leaf to update.</param>
