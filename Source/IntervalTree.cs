@@ -63,7 +63,11 @@ namespace Apos.Spatial {
         /// <summary>
         /// Amount of nodes in the tree.
         /// </summary>
-        public int Count => _tree.NodeCount;
+        public int NodeCount => _tree.NodeCount;
+        /// <summary>
+        /// Amount of items in the tree.
+        /// </summary>
+        public int Count => _tree.Count;
 
         /// <summary>
         /// Adds a new leaf to the tree, and rebalances as necessary.
@@ -72,6 +76,7 @@ namespace Apos.Spatial {
         /// <param name="item">The item to add to the tree.</param>
         /// <returns>The item's leaf. Use this to update or remove the item later.</returns>
         public int Add(Interval interval, T item) {
+            _tree.Count++;
             // Expand interval before adding.
             return InternalAdd(Expand(interval, _intervalTreeExpandConstant), item);
         }
@@ -83,6 +88,7 @@ namespace Apos.Spatial {
         public int Remove(int leaf) {
             if (leaf == INTERVAL_TREE_NULL_NODE_INDEX) return INTERVAL_TREE_NULL_NODE_INDEX;
 
+            _tree.Count--;
             int index = leaf;
             if (_tree.Root == index) {
                 _tree.Root = INTERVAL_TREE_NULL_NODE_INDEX;
@@ -552,6 +558,7 @@ namespace Apos.Spatial {
                 Freelist = 0;
                 NodeCapacity = initialCapacity;
                 NodeCount = 0;
+                Count = 0;
 
                 for (int i = 0; i < Nodes.Length - 1; i++) Nodes[i].IndexA = i + 1;
                 Nodes[Nodes.Length - 1].IndexA = INTERVAL_TREE_NULL_NODE_INDEX;
@@ -568,6 +575,7 @@ namespace Apos.Spatial {
             public int Freelist;
             public int NodeCapacity;
             public int NodeCount;
+            public int Count;
             public NodeT[] Nodes;
             public Interval[] Intervals;
             public T[] Items;
