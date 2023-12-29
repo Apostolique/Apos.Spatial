@@ -25,21 +25,13 @@ namespace Apos.Spatial {
     /// An interval tree is a dynamic partition data structure. It allows you to efficiently query the space in a game world.
     /// </summary>
     /// <typeparam name="T">Type of objects to add to the tree.</typeparam>
-    public class IntervalTree<T> : IEnumerable<T> {
-        /// <summary>
-        /// Creates a new tree.
-        /// </summary>
-        /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
-        /// <param name="expandConstant">It expands the items that are added so that they don't need to be updated as often. Defaults to 2f.</param>
-        /// <param name="moveConstant">It expands the items that are moved so that they don't need to be updated as much. Defaults to 4f.</param>
-        public IntervalTree(int initialCapacity = 64, float expandConstant = 2f, float moveConstant = 4f) {
-            _intervalTreeExpandConstant = expandConstant;
-            _intervalTreeMoveConstant = moveConstant;
-
-            _tree = new IntervalTreeT(initialCapacity);
-            _queue = new PriorityQueue(new int[INTERVAL_TREE_STACK_QUERY_CAPACITY], new float[INTERVAL_TREE_STACK_QUERY_CAPACITY], INTERVAL_TREE_STACK_QUERY_CAPACITY);
-        }
-
+    /// <remarks>
+    /// Creates a new tree.
+    /// </remarks>
+    /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
+    /// <param name="expandConstant">It expands the items that are added so that they don't need to be updated as often. Defaults to 2f.</param>
+    /// <param name="moveConstant">It expands the items that are moved so that they don't need to be updated as much. Defaults to 4f.</param>
+    public class IntervalTree<T>(int initialCapacity = 64, float expandConstant = 2f, float moveConstant = 4f) : IEnumerable<T> {
         /// <summary>
         /// Used for the broad phase search.
         /// It expands the items that are added so that they don't need to be updated as often.
@@ -455,7 +447,6 @@ namespace Apos.Spatial {
                 EnsureSize(ref _tree.Items, newCapacity);
 
                 // Link up new freelist and attach it to pre-existing freelist.
-                int nodeCapacity = _tree.NodeCapacity;
                 for (int i = 0; i < _tree.NodeCapacity - 1; i++) {
                     _tree.Nodes[_tree.NodeCapacity + i].IndexA = i + _tree.NodeCapacity + 1;
                 }
@@ -581,14 +572,7 @@ namespace Apos.Spatial {
             public T[] Items;
         }
 
-        private struct PriorityQueue {
-            public PriorityQueue(int[] indices, float[] costs, int capacity) {
-                _count = 0;
-                _capacity = capacity;
-                _indices = indices;
-                _costs = costs;
-            }
-
+        private struct PriorityQueue(int[] indices, float[] costs) {
             public void Reset() {
                 _count = 0;
             }
@@ -631,25 +615,19 @@ namespace Apos.Spatial {
                 return true;
             }
 
-            private int Predicate(int indexA, int indexB) {
+            private readonly int Predicate(int indexA, int indexB) {
                 float costA = _costs[indexA];
                 float costB = _costs[indexB];
                 return costA < costB ? -1 : costA > costB ? 1 : 0;
             }
-            private void Swap(int indexA, int indexB) {
-                int ival = _indices[indexA];
-                _indices[indexA] = _indices[indexB];
-                _indices[indexB] = ival;
-
-                float fval = _costs[indexA];
-                _costs[indexA] = _costs[indexB];
-                _costs[indexB] = fval;
+            private readonly void Swap(int indexA, int indexB) {
+                (_indices[indexB], _indices[indexA]) = (_indices[indexA], _indices[indexB]);
+                (_costs[indexB], _costs[indexA]) = (_costs[indexA], _costs[indexB]);
             }
 
-            private int _count;
-            private int _capacity;
-            private int[] _indices;
-            private float[] _costs;
+            private int _count = 0;
+            private readonly int[] _indices = indices;
+            private readonly float[] _costs = costs;
         }
 
         private struct QueryInterval : IEnumerator<T>, IEnumerable<T> {
@@ -671,9 +649,9 @@ namespace Apos.Spatial {
                 _current = default;
             }
 
-            public T Current => _current!;
+            public readonly T Current => _current!;
 
-            object IEnumerator.Current {
+            readonly object IEnumerator.Current {
                 get {
                     if (!_isStarted || _isDone) {
                         throw new InvalidOperationException("Enumeration has either not started or has already finished.");
@@ -682,7 +660,7 @@ namespace Apos.Spatial {
                 }
             }
 
-            public void Dispose() { }
+            public readonly void Dispose() { }
 
             public bool MoveNext() {
                 if (_version != _at._version) {
@@ -721,12 +699,12 @@ namespace Apos.Spatial {
                 _current = default;
             }
 
-            public IEnumerator<T> GetEnumerator() => this;
-            IEnumerator IEnumerable.GetEnumerator() => this;
+            public readonly IEnumerator<T> GetEnumerator() => this;
+            readonly IEnumerator IEnumerable.GetEnumerator() => this;
 
-            private IntervalTree<T> _at;
+            private readonly IntervalTree<T> _at;
             private Interval _interval;
-            private int[] _indexStack;
+            private readonly int[] _indexStack;
             private int _sp;
             private T? _current;
             private bool _isDone;
@@ -751,9 +729,9 @@ namespace Apos.Spatial {
                 _current = default;
             }
 
-            public T Current => _current!;
+            public readonly T Current => _current!;
 
-            object IEnumerator.Current {
+            readonly object IEnumerator.Current {
                 get {
                     if (!_isStarted || _isDone) {
                         throw new InvalidOperationException("Enumeration has either not started or has already finished.");
@@ -762,7 +740,7 @@ namespace Apos.Spatial {
                 }
             }
 
-            public void Dispose() { }
+            public readonly void Dispose() { }
 
             public bool MoveNext() {
                 if (_version != _at._version) {
@@ -798,11 +776,11 @@ namespace Apos.Spatial {
                 _current = default;
             }
 
-            public IEnumerator<T> GetEnumerator() => this;
-            IEnumerator IEnumerable.GetEnumerator() => this;
+            public readonly IEnumerator<T> GetEnumerator() => this;
+            readonly IEnumerator IEnumerable.GetEnumerator() => this;
 
-            private IntervalTree<T> _at;
-            private int[] _indexStack;
+            private readonly IntervalTree<T> _at;
+            private readonly int[] _indexStack;
             private int _sp;
             private T? _current;
             private bool _isDone;
@@ -830,7 +808,7 @@ namespace Apos.Spatial {
 
             public Interval Current => _current!.Value;
 
-            object IEnumerator.Current {
+            readonly object IEnumerator.Current {
                 get {
                     if (!_isStarted || _isDone) {
                         throw new InvalidOperationException("Enumeration has either not started or has already finished.");
@@ -839,7 +817,7 @@ namespace Apos.Spatial {
                 }
             }
 
-            public void Dispose() { }
+            public readonly void Dispose() { }
 
             public bool MoveNext() {
                 if (_version != _at._version) {
@@ -880,12 +858,12 @@ namespace Apos.Spatial {
                 _current = default;
             }
 
-            public IEnumerator<Interval> GetEnumerator() => this;
-            IEnumerator IEnumerable.GetEnumerator() => this;
+            public readonly IEnumerator<Interval> GetEnumerator() => this;
+            readonly IEnumerator IEnumerable.GetEnumerator() => this;
 
-            private IntervalTree<T> _at;
+            private readonly IntervalTree<T> _at;
             private Interval _Interval;
-            private int[] _indexStack;
+            private readonly int[] _indexStack;
             private int _sp;
             private Interval? _current;
             private bool _isDone;
@@ -912,7 +890,7 @@ namespace Apos.Spatial {
 
             public Interval Current => _current!.Value;
 
-            object IEnumerator.Current {
+            readonly object IEnumerator.Current {
                 get {
                     if (!_isStarted || _isDone) {
                         throw new InvalidOperationException("Enumeration has either not started or has already finished.");
@@ -921,7 +899,7 @@ namespace Apos.Spatial {
                 }
             }
 
-            public void Dispose() { }
+            public readonly void Dispose() { }
 
             public bool MoveNext() {
                 if (_version != _at._version) {
@@ -959,11 +937,11 @@ namespace Apos.Spatial {
                 _current = default;
             }
 
-            public IEnumerator<Interval> GetEnumerator() => this;
-            IEnumerator IEnumerable.GetEnumerator() => this;
+            public readonly IEnumerator<Interval> GetEnumerator() => this;
+            readonly IEnumerator IEnumerable.GetEnumerator() => this;
 
-            private IntervalTree<T> _at;
-            private int[] _indexStack;
+            private readonly IntervalTree<T> _at;
+            private readonly int[] _indexStack;
             private int _sp;
             private Interval? _current;
             private bool _isDone;
@@ -971,14 +949,14 @@ namespace Apos.Spatial {
             private readonly int _version;
         }
 
-        private float _intervalTreeExpandConstant;
-        private float _intervalTreeMoveConstant;
+        private float _intervalTreeExpandConstant = expandConstant;
+        private float _intervalTreeMoveConstant = moveConstant;
 
         private const int INTERVAL_TREE_STACK_QUERY_CAPACITY = 256;
         private const int INTERVAL_TREE_NULL_NODE_INDEX = -1;
 
-        private IntervalTreeT _tree;
-        private PriorityQueue _queue;
+        private IntervalTreeT _tree = new(initialCapacity);
+        private PriorityQueue _queue = new(new int[INTERVAL_TREE_STACK_QUERY_CAPACITY], new float[INTERVAL_TREE_STACK_QUERY_CAPACITY]);
         private int _version = 0;
     }
 }
