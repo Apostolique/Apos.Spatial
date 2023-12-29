@@ -588,6 +588,9 @@ namespace Apos.Spatial {
                 _count = 0;
             }
             public void Push(int index, float cost) {
+                EnsureSizeOrDouble(ref _indices, _count);
+                EnsureSizeOrDouble(ref _costs, _count);
+
                 _indices[_count] = index;
                 _costs[_count] = cost;
                 ++_count;
@@ -635,10 +638,15 @@ namespace Apos.Spatial {
                 (_indices[indexB], _indices[indexA]) = (_indices[indexA], _indices[indexB]);
                 (_costs[indexB], _costs[indexA]) = (_costs[indexA], _costs[indexB]);
             }
+            private readonly void EnsureSizeOrDouble<K>(ref K[] array, int neededCapacity) {
+                if (array.Length < neededCapacity) {
+                    Array.Resize(ref array, array.Length * 2);
+                }
+            }
 
             private int _count = 0;
-            private readonly int[] _indices = indices;
-            private readonly float[] _costs = costs;
+            private int[] _indices = indices;
+            private float[] _costs = costs;
         }
 
         private struct QueryRect : IEnumerator<T>, IEnumerable<T> {
