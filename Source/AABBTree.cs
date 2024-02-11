@@ -64,6 +64,11 @@ namespace Apos.Spatial {
         public int Count => _tree.Count;
 
         /// <summary>
+        /// Bounds of all the items in the tree.
+        /// </summary>
+        public RectangleF? Bounds => _tree.Root != AABB_TREE_NULL_NODE_INDEX ? _tree.AABBs[_tree.Root] : null;
+
+        /// <summary>
         /// Adds a new leaf to the tree, and rebalances as necessary.
         /// </summary>
         /// <param name="aabb">An axis aligned bounding box for the item.</param>

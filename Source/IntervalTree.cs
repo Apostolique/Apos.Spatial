@@ -62,6 +62,11 @@ namespace Apos.Spatial {
         public int Count => _tree.Count;
 
         /// <summary>
+        /// Bounds of all the items in the tree.
+        /// </summary>
+        public Interval? Bounds => _tree.Root != INTERVAL_TREE_NULL_NODE_INDEX ? _tree.Intervals[_tree.Root] : null;
+
+        /// <summary>
         /// Adds a new leaf to the tree, and rebalances as necessary.
         /// </summary>
         /// <param name="interval">An interval for the item.</param>
