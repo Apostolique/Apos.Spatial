@@ -37,7 +37,6 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Apos.Spatial.Tests" />
-    <InternalsVisibleTo Include="Apos.Spatial.Benchmarks" />
   </ItemGroup>
 
   <ItemGroup>
