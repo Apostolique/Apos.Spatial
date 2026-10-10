@@ -16,141 +16,245 @@
     3. This notice may not be removed or altered from any source distribution.
 */
 
+/*
+    The node layout, insertion, rotation, rebuild, and ray cast algorithms are adapted from Box2D.
+    https://github.com/erincatto/box2d
+    Copyright (c) 2026 Erin Catto
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+*/
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Xna.Framework;
-using MonoGame.Extended;
 
 namespace Apos.Spatial {
     /// <summary>
     /// An aabb tree is a dynamic partition data structure. It allows you to efficiently query the space in a game world.
+    /// Each aabb is a position `xy` for the top left corner and a `size`.
     /// </summary>
     /// <typeparam name="T">Type of objects to add to the tree.</typeparam>
-    /// <remarks>
-    /// Creates a new tree.
-    /// </remarks>
-    /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
-    /// <param name="expandConstant">It expands the items that are added so that they don't need to be updated as often. Defaults to 2f.</param>
-    /// <param name="moveConstant">It expands the items that are moved so that they don't need to be updated as much. Defaults to 4f.</param>
-    public class AABBTree<T>(int initialCapacity = 64, float expandConstant = 2f, float moveConstant = 4f) : IEnumerable<T> {
+    public class AABBTree<T> : IEnumerable<T> where T : notnull {
+        /// <summary>
+        /// Creates a new tree.
+        /// </summary>
+        /// <param name="initialCapacity">Amount of items the tree can hold before it needs to be resized.</param>
+        /// <param name="expandConstant">It expands the items that are added so that they don't need to be updated as often. Defaults to 2f.</param>
+        /// <param name="moveConstant">It expands the items that are moved so that they don't need to be updated as much. Defaults to 4f.</param>
+        public AABBTree(int initialCapacity = 64, float expandConstant = 2f, float moveConstant = 4f) {
+            _expandConstant = expandConstant;
+            _moveConstant = moveConstant;
+            Initialize(initialCapacity);
+        }
+
+        /// <summary>
+        /// Called for each item whose aabb is crossed by a ray cast.
+        /// </summary>
+        /// <param name="item">The item that was hit.</param>
+        /// <param name="maxFraction">How far along the ray the search currently goes. 0 is the start, 1 is the end.</param>
+        /// <returns>
+        /// The fraction where the ray hit the item to clip the ray there.
+        /// Return -1 to ignore the item, `maxFraction` to keep going without clipping, or 0 to stop the ray cast.
+        /// </returns>
+        public delegate float RaycastCallback(T item, float maxFraction);
+
         /// <summary>
         /// Used for the broad phase search.
         /// It expands the items that are added so that they don't need to be updated as often.
         /// </summary>
         public float ExpandConstant {
-            get => _aabbTreeExpandConstant;
-            set {
-                _aabbTreeExpandConstant = value;
-            }
+            get => _expandConstant;
+            set => _expandConstant = value;
         }
         /// <summary>
         /// Used for the broad phase search.
         /// It expands the items that are moved so that they don't need to be updated as much.
         /// </summary>
         public float MoveConstant {
-            get => _aabbTreeMoveConstant;
-            set {
-                _aabbTreeMoveConstant = value;
-            }
+            get => _moveConstant;
+            set => _moveConstant = value;
         }
         /// <summary>
         /// Amount of nodes in the tree.
         /// </summary>
-        public int NodeCount => _tree.NodeCount;
+        public int NodeCount => _count == 0 ? 0 : 2 * _count - 1;
         /// <summary>
         /// Amount of items in the tree.
         /// </summary>
-        public int Count => _tree.Count;
+        public int Count => _count;
 
         /// <summary>
         /// Bounds of all the items in the tree.
         /// </summary>
-        public RectangleF? Bounds => _tree.Root != AABB_TREE_NULL_NODE_INDEX ? _tree.AABBs[_tree.Root] : null;
+        public (Vector2 XY, Vector2 Size)? Bounds => _count > 0 ? _nodes[Root].Box.ToTuple() : null;
 
         /// <summary>
         /// Adds a new leaf to the tree, and rebalances as necessary.
+        /// An item can only be added once to the same tree.
         /// </summary>
-        /// <param name="aabb">An axis aligned bounding box for the item.</param>
+        /// <param name="xy">The top left corner of the item's aabb.</param>
+        /// <param name="size">The size of the item's aabb.</param>
         /// <param name="item">The item to add to the tree.</param>
-        /// <returns>The item's leaf. Use this to update or remove the item later.</returns>
-        public int Add(RectangleF aabb, T item) {
-            _tree.Count++;
-            // Expand aabb before adding.
-            return InternalAdd(Expand(aabb, _aabbTreeExpandConstant), item);
+        /// <returns>
+        /// The item's leaf. You can use it to update or remove the item later without a lookup.
+        /// You can also ignore it and use the item instead.
+        /// </returns>
+        public int Add(Vector2 xy, Vector2 size, T item) {
+            ArgumentNullException.ThrowIfNull(item);
+            if (_leaves.ContainsKey(item)) {
+                throw new ArgumentException("The item is already in the tree.", nameof(item));
+            }
+
+            int leaf = AllocateProxy();
+            _leaves.Add(item, leaf);
+            _items[leaf] = item;
+            InsertLeaf(leaf, Box.From(xy, size).Expand(_expandConstant));
+
+            _count++;
+            _version++;
+
+            return leaf;
         }
 
         /// <summary>
+        /// Removes an item from the tree, and rebalances as necessary.
+        /// </summary>
+        /// <param name="item">The item to remove.</param>
+        /// <returns>True if the item was in the tree, false otherwise.</returns>
+        public bool Remove(T item) {
+            if (!_leaves.TryGetValue(item, out int leaf)) return false;
+
+            Remove(leaf);
+
+            return true;
+        }
+        /// <summary>
         /// Removes a leaf from the tree, and rebalances as necessary.
         /// </summary>
+        /// <param name="leaf">The leaf to remove.</param>
         /// <returns>-1 since the leaf is no longer in the tree.</returns>
         public int Remove(int leaf) {
-            if (leaf == AABB_TREE_NULL_NODE_INDEX) return AABB_TREE_NULL_NODE_INDEX;
+            if (leaf == NullNode) return NullNode;
+            ThrowIfNotLeaf(leaf);
 
-            _tree.Count--;
-            int index = leaf;
-            if (_tree.Root == index) {
-                _tree.Root = AABB_TREE_NULL_NODE_INDEX;
-            } else {
-                ref AABBTreeT.NodeT node = ref _tree.Nodes[index];
-                int indexParent = node.IndexParent;
-                ref AABBTreeT.NodeT parent = ref _tree.Nodes[indexParent];
+            _leaves.Remove(_items[leaf]);
+            RemoveLeaf(leaf);
+            FreeProxy(leaf);
 
-                if (indexParent == _tree.Root) {
-                    if (parent.IndexA == index) _tree.Root = parent.IndexB;
-                    else _tree.Root = parent.IndexA;
-                    _tree.Nodes[_tree.Root].IndexParent = AABB_TREE_NULL_NODE_INDEX;
-                } else {
-                    int indexGrandparent = parent.IndexParent;
-                    ref AABBTreeT.NodeT grandparent = ref _tree.Nodes[indexGrandparent];
-
-                    if (parent.IndexA == index) {
-                        ref AABBTreeT.NodeT sindexBling = ref _tree.Nodes[parent.IndexB];
-                        sindexBling.IndexParent = indexGrandparent;
-                        if (grandparent.IndexA == indexParent) grandparent.IndexA = parent.IndexB;
-                        else grandparent.IndexB = parent.IndexB;
-                    } else {
-                        ref AABBTreeT.NodeT sindexBling = ref _tree.Nodes[parent.IndexA];
-                        sindexBling.IndexParent = indexGrandparent;
-                        if (grandparent.IndexA == indexParent) grandparent.IndexA = parent.IndexA;
-                        else grandparent.IndexB = parent.IndexA;
-                    }
-                    SRefitHierarchy(indexGrandparent);
-                }
-                SPushFreelist(indexParent);
-            }
-            SPushFreelist(index);
-
+            _count--;
             _version++;
 
-            return AABB_TREE_NULL_NODE_INDEX;
+            return NullNode;
         }
         /// <summary>
         /// Clears the whole tree.
         /// </summary>
-        /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
+        /// <param name="initialCapacity">Amount of items the tree can hold before it needs to be resized.</param>
         public void Clear(int initialCapacity = 64) {
-            _tree = new AABBTreeT(initialCapacity);
+            Initialize(initialCapacity);
+            _leaves.Clear();
             _version++;
         }
 
+        /// <summary>
+        /// Returns true if the item is in the tree.
+        /// </summary>
+        /// <param name="item">The item to look for.</param>
+        public bool Contains(T item) {
+            return _leaves.ContainsKey(item);
+        }
+
+        /// <summary>
+        /// Use this function when an item's aabb needs to be updated. Items need to be updated whenever the shape
+        /// inside the item's aabb moves. Internally there are some optimizations so that the tree is only
+        /// adjusted if the aabb is moved enough.
+        /// </summary>
+        /// <param name="item">The item to update.</param>
+        /// <param name="xy">The top left corner of the new aabb.</param>
+        /// <param name="size">The size of the new aabb.</param>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
+        public bool Update(T item, Vector2 xy, Vector2 size) {
+            return Move(GetLeaf(item), xy, size, Vector2.Zero);
+        }
         /// <summary>
         /// Use this function when an aabb needs to be updated. Leafs need to be updated whenever the shape
         /// inside the leaf's aabb moves. Internally there are some optimizations so that the tree is only
         /// adjusted if the aabb is moved enough.
         /// </summary>
         /// <param name="leaf">The leaf to update.</param>
-        /// <param name="aabb">The new aabb.</param>
-        /// <returns>Returns true if the leaf was updated, false otherwise.</returns>
-        public bool Update(int leaf, RectangleF aabb) {
-            if (Contains(_tree.AABBs[leaf], aabb)) {
-                _tree.AABBs[leaf] = aabb;
-                return false;
+        /// <param name="xy">The top left corner of the new aabb.</param>
+        /// <param name="size">The size of the new aabb.</param>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
+        public bool Update(int leaf, Vector2 xy, Vector2 size) {
+            return Move(leaf, xy, size, Vector2.Zero);
+        }
+
+        /// <summary>
+        /// Updates an item with a new aabb (if needed) and an `offset` for how far the new
+        /// aabb will be moving.
+        /// This function does more optimizations than `Update` by attempting to use the `offset`
+        /// to predict motion and avoid restructuring of the tree.
+        /// </summary>
+        /// <param name="item">The item to update.</param>
+        /// <param name="xy">The top left corner of the new aabb.</param>
+        /// <param name="size">The size of the new aabb.</param>
+        /// <param name="offset">An offset that represents the direction the aabb is moving in.</param>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
+        public bool Move(T item, Vector2 xy, Vector2 size, Vector2 offset) {
+            return Move(GetLeaf(item), xy, size, offset);
+        }
+        /// <summary>
+        /// Updates a leaf with a new aabb (if needed) and an `offset` for how far the new
+        /// aabb will be moving.
+        /// This function does more optimizations than `Update` by attempting to use the `offset`
+        /// to predict motion and avoid restructuring of the tree.
+        /// </summary>
+        /// <param name="leaf">The leaf to update.</param>
+        /// <param name="xy">The top left corner of the new aabb.</param>
+        /// <param name="size">The size of the new aabb.</param>
+        /// <param name="offset">An offset that represents the direction the aabb is moving in.</param>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
+        public bool Move(int leaf, Vector2 xy, Vector2 size, Vector2 offset) {
+            ThrowIfNotLeaf(leaf);
+
+            Box box = Box.From(xy, size);
+            Box fat = box.Expand(_expandConstant);
+            Vector2 delta = offset * _moveConstant;
+
+            if (delta.X < 0f) fat.MinX += delta.X;
+            else fat.MaxX += delta.X;
+
+            if (delta.Y < 0f) fat.MinY += delta.Y;
+            else fat.MaxY += delta.Y;
+
+            Box old = _nodes[_proxies[leaf].Node].Box;
+            if (old.Contains(box)) {
+                // The leaf still holds the item but it might be way too big if the item stopped moving or shrank.
+                Box huge = fat.Expand(4f * _expandConstant);
+                if (huge.Contains(old)) {
+                    return false;
+                }
             }
 
-            T item = _tree.Items[leaf]!;
-            Remove(leaf);
-            Add(aabb, item);
+            RemoveLeaf(leaf);
+            InsertLeaf(leaf, fat);
 
             _version++;
 
@@ -158,829 +262,1072 @@ namespace Apos.Spatial {
         }
 
         /// <summary>
-        /// Updates a leaf with a new aabb (if needed) with the new `aabb` and an `offset` for how far the new
-        /// aabb will be moving.
-        /// This function does more optimizations than `Update` by attempting to use the `offset`
-        /// to predict motion and avoid restructuring of the tree.
+        /// Rebuilds the whole tree from scratch. Leafs stay valid.
+        /// This can produce a better tree after adding a lot of items at once, for example when loading a level.
         /// </summary>
-        /// <param name="leaf">The leaf to update.</param>
-        /// <param name="aabb">The new aabb.</param>
-        /// <param name="offset">An offset that represents the direction the aabb is moving in.</param>
-        /// <returns>Returns true if the leaf was updated, false otherwise.</returns>
-        public bool Move(int leaf, RectangleF aabb, Vector2 offset) {
-            aabb = Expand(aabb, _aabbTreeExpandConstant);
-            Vector2 delta = offset * _aabbTreeMoveConstant;
+        public void Rebuild() {
+            if (_count <= 1) return;
 
-            if (delta.X < 0f) {
-                aabb.X += delta.X;
-                aabb.Width -= delta.X;
-            } else {
-                aabb.Width += delta.X;
-            }
+            Node[] leaves = new Node[_count];
+            int[] order = new int[_count];
+            Vector2[] centers = new Vector2[_count];
+            int leafCount = 0;
 
-            if (delta.Y < 0f) {
-                aabb.Y += delta.Y;
-                aabb.Height -= delta.Y;
-            } else {
-                aabb.Height += delta.Y;
-            }
-
-            RectangleF oldAABB = _tree.AABBs[leaf];
-            if (Contains(oldAABB, aabb)) {
-                RectangleF bigAABB = Expand(aabb, _aabbTreeMoveConstant);
-                bool oldAABBIsNotWayTooHuge = Contains(bigAABB, oldAABB);
-                if (oldAABBIsNotWayTooHuge) {
-                    return false;
+            int[] stack = RentStack();
+            int sp = 0;
+            stack[sp++] = Root;
+            while (sp > 0) {
+                ref Node node = ref _nodes[stack[--sp]];
+                if (node.Height == 0) {
+                    leaves[leafCount] = node;
+                    order[leafCount] = leafCount;
+                    centers[leafCount] = node.Box.Center;
+                    leafCount++;
+                } else {
+                    if (sp + 2 > stack.Length) stack = GrowStack(stack);
+                    stack[sp++] = node.Index;
+                    stack[sp++] = node.Index + 1;
                 }
             }
+            ReturnStack(stack);
 
-            T item = _tree.Items[leaf]!;
-            Remove(leaf);
-            InternalAdd(aabb, item);
+            BuildTree(leaves, order, centers, leafCount);
 
             _version++;
-
-            return true;
         }
 
+        /// <summary>
+        /// Returns the item's leaf.
+        /// </summary>
+        /// <param name="item">The item to lookup.</param>
+        public int GetLeaf(T item) {
+            if (!_leaves.TryGetValue(item, out int leaf)) {
+                throw new ArgumentException("The item isn't in the tree.", nameof(item));
+            }
+            return leaf;
+        }
         /// <summary>
         /// Returns the internal "expanded" aabb. This is useful for when you want to generate all pairs of
         /// potential overlaps for a specific leaf. Just simply use `Query` on the the return value
         /// of this function.
         /// </summary>
         /// <param name="leaf">The leaf to lookup.</param>
-        public RectangleF GetAABB(int leaf) {
-            return _tree.AABBs[leaf];
+        public (Vector2 XY, Vector2 Size) GetAABB(int leaf) {
+            ThrowIfNotLeaf(leaf);
+            return _nodes[_proxies[leaf].Node].Box.ToTuple();
         }
         /// <summary>
         /// Returns the `item` from `Add`.
         /// </summary>
         /// <param name="leaf">The leaf to lookup.</param>
         public T GetItem(int leaf) {
-            return _tree.Items[leaf];
+            ThrowIfNotLeaf(leaf);
+            return _items[leaf];
         }
 
         /// <summary>
         /// Returns every item in the tree. Used implicitly by foreach loops.
         /// </summary>
-        public IEnumerator<T> GetEnumerator() {
-            return new QueryAll(this);
+        public Enumerator GetEnumerator() {
+            return new Enumerator(this);
+        }
+        IEnumerator<T> IEnumerable<T>.GetEnumerator() {
+            return new Enumerator(this);
         }
         IEnumerator IEnumerable.GetEnumerator() {
-            return new QueryAll(this);
+            return new Enumerator(this);
         }
 
         /// <summary>
-        /// Finds all items overlapping the Vector2 `v`.
+        /// Finds all items overlapping the position `point`.
         /// </summary>
-        /// <param name="v">The position to query.</param>
-        public IEnumerable<T> Query(Vector2 v) {
-            return new QueryRect(this, new RectangleF(v.X, v.Y, 0f, 0f));
+        /// <param name="point">The position to query.</param>
+        public QueryEnumerator Query(Vector2 point) {
+            return new QueryEnumerator(this, new Box(point.X, point.Y, point.X, point.Y));
         }
         /// <summary>
-        /// Finds all items overlapping the Vector2 `aabb`.
+        /// Finds all items overlapping an aabb.
         /// </summary>
-        /// <param name="aabb">The aabb to query.</param>
-        public IEnumerable<T> Query(RectangleF aabb) {
-            return new QueryRect(this, aabb);
-        }
-        /// <summary>
-        /// Mostly used for debugging. It returns all the `aabb` in the tree including parent nodes.
-        /// </summary>
-        /// <param name="aabb">The aabb to query.</param>
-        public IEnumerable<RectangleF> DebugNodes(RectangleF aabb) {
-            return new QueryNodes(this, aabb);
-        }
-        /// <summary>
-        /// Mostly used for debugging. It returns all the `aabb` in the tree including parent nodes.
-        /// </summary>
-        public IEnumerable<RectangleF> DebugAllNodes() {
-            return new QueryAllNodes(this);
+        /// <param name="xy">The top left corner of the aabb to query.</param>
+        /// <param name="size">The size of the aabb to query.</param>
+        public QueryEnumerator Query(Vector2 xy, Vector2 size) {
+            return new QueryEnumerator(this, Box.From(xy, size));
         }
 
-        private int InternalAdd(RectangleF aabb, T item) {
-            // Make a new node.
-            int newIndex = SPopFreelist(aabb, item);
-            int searchIndex = _tree.Root;
+        /// <summary>
+        /// Finds all items whose aabb is crossed by the line segment from `start` to `end`.
+        /// Items closer to `start` tend to come first but the order isn't sorted.
+        /// </summary>
+        /// <param name="start">Where the ray starts.</param>
+        /// <param name="end">Where the ray ends.</param>
+        public RaycastEnumerator Raycast(Vector2 start, Vector2 end) {
+            return new RaycastEnumerator(this, start, end);
+        }
+        /// <summary>
+        /// Calls `callback` for each item whose aabb is crossed by the line segment from `start` to `end`.
+        /// The callback can return where it hit the item to clip the ray. That way it's possible to find
+        /// the closest hit without testing every item along the ray.
+        /// </summary>
+        /// <param name="start">Where the ray starts.</param>
+        /// <param name="end">Where the ray ends.</param>
+        /// <param name="callback">Called for each item that might be hit. See `RaycastCallback`.</param>
+        public void Raycast(Vector2 start, Vector2 end, RaycastCallback callback) {
+            if (_count == 0) return;
 
-            // Empty tree, make new root.
-            if (searchIndex == AABB_TREE_NULL_NODE_INDEX) {
-                _tree.Root = newIndex;
+            int version = _version;
+            Ray ray = new(start, end);
+            float maxFraction = 1f;
+
+            ref Node nodes = ref MemoryMarshal.GetArrayDataReference(_nodes);
+            int[] stack = RentStack();
+            int sp = 0;
+            stack[sp++] = Root;
+
+            while (sp > 0) {
+                int index = stack[--sp];
+                ref Node node = ref Unsafe.Add(ref nodes, index);
+
+                // Nodes are tested again since the ray might have been clipped after they were pushed.
+                if (!ray.Hits(node.Box)) continue;
+
+                if (node.Height == 0) {
+                    float value = callback(_items[node.Index], maxFraction);
+                    if (version != _version) {
+                        ReturnStack(stack);
+                        throw new InvalidOperationException("Collection was modified during the ray cast.");
+                    }
+
+                    if (value == 0f) break;
+                    if (0f < value && value < maxFraction) {
+                        maxFraction = value;
+                        ray.Clip(maxFraction);
+                    }
+                    continue;
+                }
+
+                if (sp + 2 > stack.Length) stack = GrowStack(stack);
+                sp = ray.PushChildren(ref nodes, node.Index, stack, sp);
+            }
+
+            ReturnStack(stack);
+        }
+
+        /// <summary>
+        /// Mostly used for debugging. It returns all the aabbs in the tree including parent nodes.
+        /// </summary>
+        /// <param name="xy">The top left corner of the aabb to query.</param>
+        /// <param name="size">The size of the aabb to query.</param>
+        public IEnumerable<(Vector2 XY, Vector2 Size)> DebugNodes(Vector2 xy, Vector2 size) {
+            return DebugNodes(Box.From(xy, size));
+        }
+        /// <summary>
+        /// Mostly used for debugging. It returns all the aabbs in the tree including parent nodes.
+        /// </summary>
+        public IEnumerable<(Vector2 XY, Vector2 Size)> DebugAllNodes() {
+            return DebugNodes(new Box(float.NegativeInfinity, float.NegativeInfinity, float.PositiveInfinity, float.PositiveInfinity));
+        }
+        private IEnumerable<(Vector2 XY, Vector2 Size)> DebugNodes(Box box) {
+            if (_count == 0) yield break;
+
+            int version = _version;
+            Stack<int> stack = new();
+            stack.Push(Root);
+            while (stack.Count > 0) {
+                Node node = _nodes[stack.Pop()];
+                if (!node.Box.Overlaps(box)) continue;
+
+                yield return node.Box.ToTuple();
+                ThrowIfModified(version);
+
+                if (node.Height > 0) {
+                    stack.Push(node.Index + 1);
+                    stack.Push(node.Index);
+                }
+            }
+        }
+
+        internal int Height => _count > 0 ? _nodes[Root].Height : 0;
+
+        /// <summary>
+        /// Sum of the perimeters of the internal nodes divided by the perimeter of the root.
+        /// Lower is better. Used to compare the quality of trees.
+        /// </summary>
+        internal float AreaRatio {
+            get {
+                if (_count == 0) return 0f;
+                float rootArea = _nodes[Root].Box.Perimeter;
+                if (rootArea <= 0f) return 0f;
+
+                float internalArea = 0f;
+                for (int i = 2; i < _nodeEnd; i++) {
+                    if (_nodes[i].Height > 0) internalArea += _nodes[i].Box.Perimeter;
+                }
+                return internalArea / rootArea;
+            }
+        }
+
+        internal void Validate() {
+            if (_parents[Root] != NullNode) throw new InvalidOperationException("Root has a parent.");
+            if (_nodes[Root + 1].Height != EmptyHeight) throw new InvalidOperationException("The node beside the root isn't empty.");
+
+            int freePairs = 0;
+            for (int pair = _pairFreeList; pair != NullNode; pair = _parents[pair]) {
+                if (_nodes[pair].Height != EmptyHeight || _nodes[pair + 1].Height != EmptyHeight) throw new InvalidOperationException("Free pair isn't empty.");
+                freePairs++;
+            }
+            if (_nodeEnd != 2 * Math.Max(_count, 1) + 2 * freePairs) throw new InvalidOperationException("Leaked nodes.");
+
+            int freeProxies = 0;
+            for (int i = _proxyFreeList; i != NullNode; i = _proxies[i].Next) {
+                if (_proxies[i].Node != NullNode) throw new InvalidOperationException("Free proxy points to a node.");
+                freeProxies++;
+            }
+            if (freeProxies + _count != _proxies.Length) throw new InvalidOperationException("Leaked proxies.");
+
+            int leafCount = 0;
+            if (_count == 0) {
+                if (_nodes[Root].Height != EmptyHeight) throw new InvalidOperationException("Empty tree has a root.");
             } else {
-                searchIndex = SBranchAndBoundFindOptimalSibling(aabb);
+                ValidateSubtree(Root, ref leafCount);
+            }
+            if (leafCount != _count) throw new InvalidOperationException($"Expected {_count} leaves, found {leafCount}.");
+            if (_leaves.Count != _count) throw new InvalidOperationException("The item lookup is out of sync.");
+        }
+        private int ValidateSubtree(int index, ref int leafCount) {
+            ref Node node = ref _nodes[index];
+            if (node.Height == 0) {
+                if (_proxies[node.Index].Node != index) throw new InvalidOperationException("Proxy doesn't point to its leaf.");
+                if (_leaves[_items[node.Index]] != node.Index) throw new InvalidOperationException("Item doesn't map to its leaf.");
+                leafCount++;
+                return 0;
+            }
+            if (node.Height < 0) throw new InvalidOperationException("Empty node in the tree.");
 
-                // Make new branch node.
-                int branchIndex = SPopFreelist(RectangleF.Union(aabb, _tree.AABBs[searchIndex]));
-                ref AABBTreeT.NodeT branch = ref _tree.Nodes[branchIndex];
-                int parentIndex = _tree.Nodes[searchIndex].IndexParent;
+            int pair = node.Index;
+            if ((pair & 1) != 0 || pair < 2 || pair >= _nodeEnd) throw new InvalidOperationException("Bad pair.");
+            if (_parents[pair] != index || _parents[pair + 1] != index) throw new InvalidOperationException("Bad parent.");
 
-                if (parentIndex == AABB_TREE_NULL_NODE_INDEX) {
-                    _tree.Root = branchIndex;
-                } else {
-                    ref AABBTreeT.NodeT parent = ref _tree.Nodes[parentIndex];
+            Box union = Box.Union(_nodes[pair].Box, _nodes[pair + 1].Box);
+            if (!node.Box.Equals(union)) throw new InvalidOperationException("Node isn't the union of its children.");
 
-                    // Hookup parent to the new branch.
-                    if (parent.IndexA == searchIndex) {
-                        parent.IndexA = branchIndex;
-                    } else {
-                        parent.IndexB = branchIndex;
-                    }
-                }
+            int height1 = ValidateSubtree(pair, ref leafCount);
+            int height2 = ValidateSubtree(pair + 1, ref leafCount);
+            if (node.Height != 1 + Math.Max(height1, height2)) throw new InvalidOperationException("Bad height.");
+            return node.Height;
+        }
 
-                // Assign branch children and parent.
-                branch.IndexA = searchIndex;
-                branch.IndexB = newIndex;
-                branch.IndexParent = parentIndex;
-                branch.Height = _tree.Nodes[searchIndex].Height + 1;
+        private void Initialize(int initialCapacity) {
+            int capacity = Math.Max(initialCapacity, 16);
 
-                // Assign parent pointers for new the leaf pair, and heights.
-                _tree.Nodes[searchIndex].IndexParent = branchIndex;
-                _tree.Nodes[newIndex].IndexParent = branchIndex;
+            // A tree of n items has 2n - 1 nodes plus the empty node beside the root.
+            _nodes = new Node[2 * capacity];
+            _parents = new int[2 * capacity];
+            _nodes[Root] = Node.Empty;
+            _nodes[Root + 1] = Node.Empty;
+            _parents[Root] = NullNode;
+            _parents[Root + 1] = NullNode;
+            _nodeEnd = 2;
+            _pairFreeList = NullNode;
 
-                SRefitHierarchy(parentIndex);
+            _proxies = new Proxy[capacity];
+            _items = new T[capacity];
+            LinkFreeProxies(0);
+
+            _count = 0;
+        }
+
+        private void LinkFreeProxies(int start) {
+            for (int i = start; i < _proxies.Length; i++) {
+                _proxies[i].Node = NullNode;
+                _proxies[i].Next = i + 1;
+            }
+            _proxies[^1].Next = NullNode;
+            _proxyFreeList = start;
+        }
+        private int AllocateProxy() {
+            if (_proxyFreeList == NullNode) {
+                int oldCapacity = _proxies.Length;
+                Array.Resize(ref _proxies, oldCapacity * 2);
+                Array.Resize(ref _items, oldCapacity * 2);
+                LinkFreeProxies(oldCapacity);
             }
 
-            _version++;
-
-            return newIndex;
+            int leaf = _proxyFreeList;
+            _proxyFreeList = _proxies[leaf].Next;
+            _proxies[leaf].Next = NullNode;
+            return leaf;
         }
-        private int SBalance(int indexA) {
-            //      a
-            //    /   \
-            //   b     c
-            //  / \   / \
-            // d   e f   g
+        private void FreeProxy(int leaf) {
+            _proxies[leaf].Node = NullNode;
+            _proxies[leaf].Next = _proxyFreeList;
+            _items[leaf] = default!;
+            _proxyFreeList = leaf;
+        }
 
-            ref AABBTreeT.NodeT a = ref _tree.Nodes[indexA];
-            int indexB = a.IndexA;
-            int indexC = a.IndexB;
-            if (a.IndexA == AABB_TREE_NULL_NODE_INDEX || a.Height < 2) return indexA;
-
-            ref AABBTreeT.NodeT b = ref _tree.Nodes[indexB];
-            ref AABBTreeT.NodeT c = ref _tree.Nodes[indexC];
-            int balance = c.Height - b.Height;
-
-            // Rotate c up.
-            if (balance > 1) {
-                int indexF = c.IndexA;
-                int indexG = c.IndexB;
-                ref AABBTreeT.NodeT f = ref _tree.Nodes[indexF];
-                ref AABBTreeT.NodeT g = ref _tree.Nodes[indexG];
-
-                // Swap a and c.
-                c.IndexA = indexA;
-                c.IndexParent = a.IndexParent;
-                a.IndexParent = indexC;
-
-                // Hookup a's old parent to c.
-                if (c.IndexParent != AABB_TREE_NULL_NODE_INDEX) {
-                    if (_tree.Nodes[c.IndexParent].IndexA == indexA) {
-                        _tree.Nodes[c.IndexParent].IndexA = indexC;
-                    } else {
-                        _tree.Nodes[c.IndexParent].IndexB = indexC;
-                    }
-                } else {
-                    _tree.Root = indexC;
-                }
-
-                // Rotation, picking f or g to go under a or c respectively.
-                //       c
-                //      / \
-                //     a   ? (f or g)
-                //    / \
-                //   b   ? (f or g)
-                //  / \
-                // d   e
-                if (f.Height > g.Height) {
-                    c.IndexB = indexF;
-                    a.IndexB = indexG;
-                    g.IndexParent = indexA;
-                    _tree.AABBs[indexA] = RectangleF.Union(_tree.AABBs[indexB], _tree.AABBs[indexG]);
-                    _tree.AABBs[indexC] = RectangleF.Union(_tree.AABBs[indexA], _tree.AABBs[indexF]);
-
-                    a.Height = Math.Max(b.Height, g.Height) + 1;
-                    c.Height = Math.Max(a.Height, f.Height) + 1;
-                } else {
-                    c.IndexB = indexG;
-                    a.IndexB = indexF;
-                    f.IndexParent = indexA;
-                    _tree.AABBs[indexA] = RectangleF.Union(_tree.AABBs[indexB], _tree.AABBs[indexF]);
-                    _tree.AABBs[indexC] = RectangleF.Union(_tree.AABBs[indexA], _tree.AABBs[indexG]);
-
-                    a.Height = Math.Max(b.Height, f.Height) + 1;
-                    c.Height = Math.Max(a.Height, g.Height) + 1;
-                }
-
-                return indexC;
-            } else if (balance < -1) {
-                // Rotate b up.
-
-                int indexD = b.IndexA;
-                int indexE = b.IndexB;
-                ref AABBTreeT.NodeT d = ref _tree.Nodes[indexD];
-                ref AABBTreeT.NodeT e = ref _tree.Nodes[indexE];
-
-                // Swap a and b.
-                b.IndexA = indexA;
-                b.IndexParent = a.IndexParent;
-                a.IndexParent = indexB;
-
-                // Hookup a's old parent to b.
-                if (b.IndexParent != AABB_TREE_NULL_NODE_INDEX) {
-                    if (_tree.Nodes[b.IndexParent].IndexA == indexA) {
-                        _tree.Nodes[b.IndexParent].IndexA = indexB;
-                    } else {
-                        _tree.Nodes[b.IndexParent].IndexB = indexB;
-                    }
-                } else {
-                    _tree.Root = indexB;
-                }
-
-                // Rotation, picking d or e to go under a or b respectively.
-                //            b
-                //           / \
-                // (d or e) ?   a
-                //             / \
-                //   (d or e) ?   c
-                //               / \
-                //              f   g
-                if (d.Height > e.Height) {
-                    b.IndexB = indexD;
-                    a.IndexA = indexE;
-                    e.IndexParent = indexA;
-                    _tree.AABBs[indexA] = RectangleF.Union(_tree.AABBs[indexC], _tree.AABBs[indexE]);
-                    _tree.AABBs[indexB] = RectangleF.Union(_tree.AABBs[indexA], _tree.AABBs[indexD]);
-
-                    a.Height = Math.Max(c.Height, e.Height) + 1;
-                    b.Height = Math.Max(a.Height, d.Height) + 1;
-                } else {
-                    b.IndexB = indexE;
-                    a.IndexA = indexD;
-                    d.IndexParent = indexA;
-                    _tree.AABBs[indexA] = RectangleF.Union(_tree.AABBs[indexC], _tree.AABBs[indexD]);
-                    _tree.AABBs[indexB] = RectangleF.Union(_tree.AABBs[indexA], _tree.AABBs[indexE]);
-
-                    a.Height = Math.Max(c.Height, d.Height) + 1;
-                    b.Height = Math.Max(a.Height, e.Height) + 1;
-                }
-
-                return indexB;
+        // Children are allocated in pairs so that siblings sit next to each other in memory.
+        // Free pairs are chained through the parent of their first node.
+        private int AllocatePair() {
+            if (_pairFreeList != NullNode) {
+                int free = _pairFreeList;
+                _pairFreeList = _parents[free];
+                return free;
             }
 
-            return indexA;
+            if (_nodeEnd + 2 > _nodes.Length) {
+                Array.Resize(ref _nodes, _nodes.Length * 2);
+                Array.Resize(ref _parents, _parents.Length * 2);
+            }
+
+            int pair = _nodeEnd;
+            _nodeEnd += 2;
+            return pair;
+        }
+        private void FreePair(int pair) {
+            _nodes[pair] = Node.Empty;
+            _nodes[pair + 1] = Node.Empty;
+            _parents[pair] = _pairFreeList;
+            _parents[pair + 1] = NullNode;
+            _pairFreeList = pair;
         }
 
-        private void SSyncNode(int index) {
-            ref AABBTreeT.NodeT node = ref _tree.Nodes[index];
-            int indexA = node.IndexA;
-            int indexB = node.IndexB;
-            node.Height = Math.Max(_tree.Nodes[indexA].Height, _tree.Nodes[indexB].Height) + 1;
-            _tree.AABBs[index] = RectangleF.Union(_tree.AABBs[indexA], _tree.AABBs[indexB]);
-        }
-
-        private void SRefitHierarchy(int index) {
-            while (index != AABB_TREE_NULL_NODE_INDEX) {
-                index = SBalance(index);
-                SSyncNode(index);
-                index = _tree.Nodes[index].IndexParent;
+        // A node moved to `index`, the nodes under it need to know.
+        private void LinkChildren(int index) {
+            ref Node node = ref _nodes[index];
+            if (node.Height == 0) {
+                _proxies[node.Index].Node = index;
+            } else {
+                _parents[node.Index] = index;
+                _parents[node.Index + 1] = index;
             }
         }
 
-        private void EnsureSize<K>(ref K[] array, int newCapacity) {
-            if (array.Length < newCapacity) {
-                Array.Resize(ref array, newCapacity);
-            }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Node MakeInternal(Node[] nodes, int pair) {
+            ref Node child1 = ref nodes[pair];
+            ref Node child2 = ref nodes[pair + 1];
+            return new Node {
+                Box = Box.Union(child1.Box, child2.Box),
+                Index = pair,
+                Height = 1 + Math.Max(child1.Height, child2.Height),
+            };
         }
 
-        private int SPopFreelist(RectangleF aabb, T item = default!) {
-            int newIndex = _tree.Freelist;
-            if (newIndex == AABB_TREE_NULL_NODE_INDEX) {
-                int newCapacity = _tree.NodeCapacity * 2;
-                EnsureSize(ref _tree.Nodes, newCapacity);
-                EnsureSize(ref _tree.AABBs, newCapacity);
-                EnsureSize(ref _tree.Items, newCapacity);
+        // Greedy search for the sibling that adds the least perimeter to the tree.
+        // There are three choices for a new leaf D under a node A with children B and C:
+        // 1: D becomes the sibling of A.
+        // 2: D goes somewhere under B.
+        // 3: D goes somewhere under C.
+        // The descent picks the child with the lowest lower bound cost and stops once no child can beat the best cost.
+        private int FindBestSibling(Box boxD) {
+            Node[] nodes = _nodes;
+            Vector2 centerD = boxD.Center;
+            float areaD = boxD.Perimeter;
 
-                // Link up new freelist and attach it to pre-existing freelist.
-                for (int i = 0; i < _tree.NodeCapacity - 1; i++) {
-                    _tree.Nodes[_tree.NodeCapacity + i].IndexA = i + _tree.NodeCapacity + 1;
-                }
-                _tree.Nodes[newCapacity - 1].IndexA = AABB_TREE_NULL_NODE_INDEX;
-                _tree.Freelist = _tree.NodeCapacity;
-                newIndex = _tree.Freelist;
-                _tree.NodeCapacity = newCapacity;
-            }
+            int index = Root;
+            if (nodes[index].Height == 0) return index;
 
-            _tree.Freelist = _tree.Nodes[newIndex].IndexA;
-            _tree.Nodes[newIndex].IndexA = AABB_TREE_NULL_NODE_INDEX;
-            _tree.Nodes[newIndex].IndexB = AABB_TREE_NULL_NODE_INDEX;
-            _tree.Nodes[newIndex].IndexParent = AABB_TREE_NULL_NODE_INDEX;
-            _tree.Nodes[newIndex].Height = 0;
-            _tree.AABBs[newIndex] = aabb;
-            _tree.Items[newIndex] = item;
+            Box rootBox = nodes[index].Box;
+            float areaBase = rootBox.Perimeter;
+            float directCost = Box.Union(rootBox, boxD).Perimeter;
+            float inheritedCost = 0f;
 
-            _tree.NodeCount++;
+            int bestSibling = index;
+            float bestCost = directCost;
 
-            return newIndex;
-        }
+            while (true) {
+                int child1 = nodes[index].Index;
+                int child2 = child1 + 1;
 
-        private void SPushFreelist(int index) {
-            _tree.Nodes[index].IndexA = _tree.Freelist;
-            _tree.Items[index] = default!;
-            _tree.Freelist = index;
-            _tree.NodeCount--;
-        }
-
-        private float SDeltaCost(RectangleF toInsert, RectangleF candidate) {
-            return SurfaceArea(RectangleF.Union(toInsert, candidate)) - SurfaceArea(candidate);
-        }
-
-        // https://en.wikipedia.org/wiki/Branch_and_bound#Generic_version
-        private int SBranchAndBoundFindOptimalSibling(RectangleF toInsert) {
-            _queue.Reset();
-            _queue.Push(_tree.Root, SDeltaCost(toInsert, _tree.AABBs[_tree.Root]));
-
-            float toInsertSA = SurfaceArea(toInsert);
-            float bestCost = float.MaxValue;
-            int bestIndex = AABB_TREE_NULL_NODE_INDEX;
-            int searchIndex = 0;
-            float searchDeltaCost = 0f;
-            while (_queue.TryPop(ref searchIndex, ref searchDeltaCost)) {
-                // Track the best candidate so far.
-                RectangleF searchAABB = _tree.AABBs[searchIndex];
-                float cost = SurfaceArea(RectangleF.Union(toInsert, searchAABB)) + searchDeltaCost;
+                // Cost of creating a new parent for this node and the new leaf.
+                float cost = directCost + inheritedCost;
                 if (cost < bestCost) {
+                    bestSibling = index;
                     bestCost = cost;
-                    bestIndex = searchIndex;
                 }
 
-                // Consider pushing the candidate's children onto the priority queue.
-                // Cull subtrees with lower bound metric.
-                float deltaCost = SDeltaCost(toInsert, searchAABB) + searchDeltaCost;
-                float lowerBound = toInsertSA + deltaCost;
-                if (lowerBound < bestCost) {
-                    int indexA = _tree.Nodes[searchIndex].IndexA;
-                    int indexB = _tree.Nodes[searchIndex].IndexB;
-                    if (indexA != AABB_TREE_NULL_NODE_INDEX) {
-                        _queue.Push(indexA, deltaCost);
-                        _queue.Push(indexB, deltaCost);
+                // Inheritance cost seen by the children.
+                inheritedCost += directCost - areaBase;
+
+                ref Node node1 = ref nodes[child1];
+                ref Node node2 = ref nodes[child2];
+                bool leaf1 = node1.Height == 0;
+                bool leaf2 = node2.Height == 0;
+
+                float lowerCost1 = float.MaxValue;
+                float directCost1 = Box.Union(node1.Box, boxD).Perimeter;
+                float area1 = 0f;
+                if (leaf1) {
+                    float cost1 = directCost1 + inheritedCost;
+                    if (cost1 < bestCost) {
+                        bestSibling = child1;
+                        bestCost = cost1;
                     }
-                }
-            }
-
-            return bestIndex;
-        }
-
-        private float STreeCost(int index) {
-            if (index == AABB_TREE_NULL_NODE_INDEX) return 0f;
-            float costA = STreeCost(_tree.Nodes[index].IndexA);
-            float costB = STreeCost(_tree.Nodes[index].IndexB);
-            float myCost = SurfaceArea(_tree.AABBs[index]);
-            return costA + costB + myCost;
-        }
-
-        private static RectangleF Expand(RectangleF aabb, float v) {
-            return new RectangleF(aabb.Left - v, aabb.Top - v, aabb.Width + v * 2f, aabb.Height + v * 2f);
-        }
-        private static float SurfaceArea(RectangleF bb) {
-            return bb.Width * bb.Height;
-        }
-        private static bool Contains(RectangleF r1, RectangleF r2) {
-            return r1.Left <= r2.Left && r2.Right <= r1.Right && r1.Top <= r2.Top && r2.Bottom <= r1.Bottom;
-        }
-        private static bool Collide(RectangleF a, RectangleF b) {
-            bool d0 = b.Right < a.Left;
-            bool d1 = a.Right < b.Left;
-            bool d2 = b.Bottom < a.Top;
-            bool d3 = a.Bottom < b.Top;
-            return !(d0 || d1 || d2 || d3);
-        }
-
-        private struct AABBTreeT {
-            public AABBTreeT(int initialCapacity = 0) {
-                if (initialCapacity == 0) initialCapacity = 64;
-                Nodes = new NodeT[initialCapacity];
-                AABBs = new RectangleF[initialCapacity];
-                Items = new T[initialCapacity];
-                Root = AABB_TREE_NULL_NODE_INDEX;
-                Freelist = 0;
-                NodeCapacity = initialCapacity;
-                NodeCount = 0;
-                Count = 0;
-
-                for (int i = 0; i < Nodes.Length - 1; i++) Nodes[i].IndexA = i + 1;
-                Nodes[Nodes.Length - 1].IndexA = AABB_TREE_NULL_NODE_INDEX;
-            }
-
-            public struct NodeT {
-                public int IndexA;
-                public int IndexB;
-                public int IndexParent;
-                public int Height;
-            }
-
-            public int Root;
-            public int Freelist;
-            public int NodeCapacity;
-            public int NodeCount;
-            public int Count;
-            public NodeT[] Nodes;
-            public RectangleF[] AABBs;
-            public T[] Items;
-        }
-
-        private struct PriorityQueue(int[] indices, float[] costs) {
-            public void Reset() {
-                _count = 0;
-            }
-            public void Push(int index, float cost) {
-                EnsureSizeOrDouble(ref _indices, _count);
-                EnsureSizeOrDouble(ref _costs, _count);
-
-                _indices[_count] = index;
-                _costs[_count] = cost;
-                ++_count;
-
-                int i = _count;
-                while (i > 1 && Predicate(i - 1, i / 2 - 1) > 0) {
-                    Swap(i - 1, i / 2 - 1);
-                    i /= 2;
-                }
-            }
-            public bool TryPop(ref int index, ref float cost) {
-                if (_count == 0) return false;
-                index = _indices[0];
-                cost = _costs[0];
-
-                _count--;
-                _indices[0] = _indices[_count];
-                _costs[0] = _costs[_count];
-
-                int u = 0;
-                int v = 1;
-                while (u != v) {
-                    u = v;
-                    if (2 * u + 1 <= _count) {
-                        if (Predicate(u - 1, 2 * u - 1) <= 0) v = 2 * u;
-                        if (Predicate(v - 1, 2 * u) <= 0) v = 2 * u + 1;
-                    } else if (2 * u <= _count) {
-                        if (Predicate(u - 1, 2 * u - 1) <= 0) v = 2 * u;
-                    }
-
-                    if (u != v) {
-                        Swap(u - 1, v - 1);
-                    }
-                }
-
-                return true;
-            }
-
-            private readonly int Predicate(int indexA, int indexB) {
-                float costA = _costs[indexA];
-                float costB = _costs[indexB];
-                return costA < costB ? -1 : costA > costB ? 1 : 0;
-            }
-            private readonly void Swap(int indexA, int indexB) {
-                (_indices[indexB], _indices[indexA]) = (_indices[indexA], _indices[indexB]);
-                (_costs[indexB], _costs[indexA]) = (_costs[indexA], _costs[indexB]);
-            }
-            private readonly void EnsureSizeOrDouble<K>(ref K[] array, int neededCapacity) {
-                if (array.Length < neededCapacity) {
-                    Array.Resize(ref array, array.Length * 2);
-                }
-            }
-
-            private int _count = 0;
-            private int[] _indices = indices;
-            private float[] _costs = costs;
-        }
-
-        private struct QueryRect : IEnumerator<T>, IEnumerable<T> {
-            public QueryRect(AABBTree<T> at, RectangleF aabb) {
-                _at = at;
-                _aabb = aabb;
-                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
                 } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
+                    area1 = node1.Box.Perimeter;
+                    // Either child 1 is the sibling or one of its descendants is.
+                    lowerCost1 = inheritedCost + directCost1 + MathF.Min(areaD - area1, 0f);
                 }
-                _isStarted = false;
-                _version = _at._version;
+
+                float lowerCost2 = float.MaxValue;
+                float directCost2 = Box.Union(node2.Box, boxD).Perimeter;
+                float area2 = 0f;
+                if (leaf2) {
+                    float cost2 = directCost2 + inheritedCost;
+                    if (cost2 < bestCost) {
+                        bestSibling = child2;
+                        bestCost = cost2;
+                    }
+                } else {
+                    area2 = node2.Box.Perimeter;
+                    lowerCost2 = inheritedCost + directCost2 + MathF.Min(areaD - area2, 0f);
+                }
+
+                if (leaf1 && leaf2) break;
+
+                // Can the cost possibly be decreased?
+                if (bestCost <= lowerCost1 && bestCost <= lowerCost2) break;
+
+                if (lowerCost1 == lowerCost2 && !leaf1) {
+                    // No clear choice, this happens when both children fully contain D. Fall back to the distance.
+                    lowerCost1 = Vector2.DistanceSquared(node1.Box.Center, centerD);
+                    lowerCost2 = Vector2.DistanceSquared(node2.Box.Center, centerD);
+                }
+
+                if (lowerCost1 < lowerCost2 && !leaf1) {
+                    index = child1;
+                    areaBase = area1;
+                    directCost = directCost1;
+                } else {
+                    index = child2;
+                    areaBase = area2;
+                    directCost = directCost2;
+                }
+            }
+
+            return bestSibling;
+        }
+
+        private void InsertLeaf(int leaf, Box box) {
+            Node leafNode = new() { Box = box, Index = leaf, Height = 0 };
+
+            if (_nodes[Root].Height == EmptyHeight) {
+                _nodes[Root] = leafNode;
+                _proxies[leaf].Node = Root;
+                return;
+            }
+
+            int sibling = FindBestSibling(box);
+
+            // The sibling moves down into a new pair beside the leaf and its old spot becomes their parent.
+            // Allocating can resize the arrays so it happens before reading them.
+            int pair = AllocatePair();
+            Node[] nodes = _nodes;
+            int[] parents = _parents;
+
+            nodes[pair] = nodes[sibling];
+            nodes[pair + 1] = leafNode;
+            parents[pair] = sibling;
+            parents[pair + 1] = sibling;
+            LinkChildren(pair);
+            _proxies[leaf].Node = pair + 1;
+
+            nodes[sibling] = MakeInternal(nodes, pair);
+
+            Rotate(sibling);
+            RefitAncestors(parents[sibling], rotate: true);
+        }
+
+        private void RemoveLeaf(int leaf) {
+            int index = _proxies[leaf].Node;
+            if (index == Root) {
+                _nodes[Root] = Node.Empty;
+                return;
+            }
+
+            // The sibling takes the parent's spot.
+            int parent = _parents[index];
+            _nodes[parent] = _nodes[index ^ 1];
+            LinkChildren(parent);
+            FreePair(index & ~1);
+
+            RefitAncestors(_parents[parent], rotate: false);
+        }
+
+        // Rotating while removing costs a lot more than it improves the tree.
+        private void RefitAncestors(int index, bool rotate) {
+            Node[] nodes = _nodes;
+            int[] parents = _parents;
+            while (index != NullNode) {
+                ref Node node = ref nodes[index];
+                Node refit = MakeInternal(nodes, node.Index);
+
+                // Nothing changes above this node.
+                if (refit.Height == node.Height && refit.Box.Equals(node.Box)) break;
+
+                node = refit;
+                if (rotate) Rotate(index);
+
+                index = parents[index];
+            }
+        }
+
+        // Swaps a child of A with a grandchild under the other child when that lowers the perimeter of the tree.
+        //       A
+        //    /     \
+        //   B       C
+        //  / \     / \
+        // D   E   F   G
+        private void Rotate(int iA) {
+            Node[] nodes = _nodes;
+            ref Node a = ref nodes[iA];
+            if (a.Height < 2) return;
+
+            int iB = a.Index;
+            int iC = iB + 1;
+            ref Node b = ref nodes[iB];
+            ref Node c = ref nodes[iC];
+
+            int bestDown = NullNode;
+            int bestUp = NullNode;
+            float bestDelta = 0f;
+
+            if (c.Height > 0) {
+                int iF = c.Index;
+                int iG = iF + 1;
+                float areaC = c.Box.Perimeter;
+
+                // B <-> F then C (B G)
+                float deltaBF = Box.Union(b.Box, nodes[iG].Box).Perimeter - areaC;
+                if (deltaBF < bestDelta) {
+                    bestDown = iB;
+                    bestUp = iF;
+                    bestDelta = deltaBF;
+                }
+
+                // B <-> G then C (F B)
+                float deltaBG = Box.Union(b.Box, nodes[iF].Box).Perimeter - areaC;
+                if (deltaBG < bestDelta) {
+                    bestDown = iB;
+                    bestUp = iG;
+                    bestDelta = deltaBG;
+                }
+            }
+
+            if (b.Height > 0) {
+                int iD = b.Index;
+                int iE = iD + 1;
+                float areaB = b.Box.Perimeter;
+
+                // C <-> D then B (C E)
+                float deltaCD = Box.Union(c.Box, nodes[iE].Box).Perimeter - areaB;
+                if (deltaCD < bestDelta) {
+                    bestDown = iC;
+                    bestUp = iD;
+                    bestDelta = deltaCD;
+                }
+
+                // C <-> E then B (D C)
+                float deltaCE = Box.Union(c.Box, nodes[iD].Box).Perimeter - areaB;
+                if (deltaCE < bestDelta) {
+                    bestDown = iC;
+                    bestUp = iE;
+                }
+            }
+
+            if (bestDown == NullNode) return;
+
+            (nodes[bestDown], nodes[bestUp]) = (nodes[bestUp], nodes[bestDown]);
+            LinkChildren(bestDown);
+            LinkChildren(bestUp);
+
+            // The node that went down now sits under its old sibling, which needs a refit.
+            int sibling = bestDown ^ 1;
+            nodes[sibling] = MakeInternal(nodes, nodes[sibling].Index);
+            a.Height = 1 + Math.Max(nodes[iB].Height, nodes[iC].Height);
+        }
+
+        // Top down build that splits the leaves at the middle of their centers along the longest axis.
+        // The nodes are written in depth first order.
+        private void BuildTree(Node[] leaves, int[] order, Vector2[] centers, int leafCount) {
+            Node[] nodes = _nodes;
+            _nodeEnd = 2;
+            _pairFreeList = NullNode;
+            nodes[Root + 1] = Node.Empty;
+
+            BuildItem[] stack = new BuildItem[64];
+            int top = 0;
+            stack[0] = new BuildItem {
+                NodeIndex = Root,
+                Pair = BumpPair(Root),
+                ChildCount = -1,
+                StartIndex = 0,
+                EndIndex = leafCount,
+                SplitIndex = PartitionMid(order, centers, 0, leafCount),
+            };
+
+            while (true) {
+                ref BuildItem item = ref stack[top];
+                item.ChildCount++;
+
+                if (item.ChildCount == 2) {
+                    // Both children are written, the node can be finalized.
+                    nodes[item.NodeIndex] = MakeInternal(nodes, item.Pair);
+                    if (top == 0) break;
+                    top--;
+                    continue;
+                }
+
+                int slot = item.ChildCount;
+                int startIndex = slot == 0 ? item.StartIndex : item.SplitIndex;
+                int endIndex = slot == 0 ? item.SplitIndex : item.EndIndex;
+                int nodeIndex = item.Pair + slot;
+
+                if (endIndex - startIndex == 1) {
+                    Node leaf = leaves[order[startIndex]];
+                    nodes[nodeIndex] = leaf;
+                    _proxies[leaf.Index].Node = nodeIndex;
+                    continue;
+                }
+
+                if (top + 1 == stack.Length) Array.Resize(ref stack, stack.Length * 2);
+                top++;
+                stack[top] = new BuildItem {
+                    NodeIndex = nodeIndex,
+                    Pair = BumpPair(nodeIndex),
+                    ChildCount = -1,
+                    StartIndex = startIndex,
+                    EndIndex = endIndex,
+                    SplitIndex = PartitionMid(order, centers, startIndex, endIndex),
+                };
+            }
+        }
+        private int BumpPair(int parent) {
+            int pair = _nodeEnd;
+            _nodeEnd += 2;
+            _parents[pair] = parent;
+            _parents[pair + 1] = parent;
+            return pair;
+        }
+        private static int PartitionMid(int[] order, Vector2[] centers, int start, int end) {
+            int count = end - start;
+            if (count <= 2) return start + count / 2;
+
+            Vector2 min = centers[start];
+            Vector2 max = centers[start];
+            for (int i = start + 1; i < end; i++) {
+                min = Vector2.Min(min, centers[i]);
+                max = Vector2.Max(max, centers[i]);
+            }
+
+            Vector2 d = max - min;
+            bool splitX = d.X > d.Y;
+            float pivot = splitX ? (min.X + max.X) * 0.5f : (min.Y + max.Y) * 0.5f;
+
+            // Hoare partition around the pivot.
+            int i1 = start;
+            int i2 = end;
+            while (i1 < i2) {
+                while (i1 < i2 && (splitX ? centers[i1].X : centers[i1].Y) < pivot) i1++;
+                while (i1 < i2 && (splitX ? centers[i2 - 1].X : centers[i2 - 1].Y) >= pivot) i2--;
+
+                if (i1 < i2) {
+                    (order[i1], order[i2 - 1]) = (order[i2 - 1], order[i1]);
+                    (centers[i1], centers[i2 - 1]) = (centers[i2 - 1], centers[i1]);
+                    i1++;
+                    i2--;
+                }
+            }
+
+            if (i1 > start && i1 < end) return i1;
+            return start + count / 2;
+        }
+
+        // The stacks are reused between searches to avoid allocations. Searches that run at the same time get their own.
+        private int[] RentStack() {
+            return Interlocked.Exchange(ref _stackCache, null) ?? new int[StackCapacity];
+        }
+        private void ReturnStack(int[] stack) {
+            _stackCache = stack;
+        }
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int[] GrowStack(int[] stack) {
+            int[] bigger = new int[stack.Length * 2];
+            stack.CopyTo(bigger, 0);
+            return bigger;
+        }
+
+        private void ThrowIfNotLeaf(int leaf) {
+            if ((uint)leaf >= (uint)_proxies.Length || _proxies[leaf].Node == NullNode) {
+                throw new ArgumentException($"{leaf} isn't a leaf in the tree.", nameof(leaf));
+            }
+        }
+        private void ThrowIfModified(int version) {
+            if (version != _version) {
+                throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+            }
+        }
+
+        /// <summary>
+        /// Enumerates every item in the tree.
+        /// </summary>
+        public struct Enumerator : IEnumerator<T> {
+            internal Enumerator(AABBTree<T> tree) {
+                _tree = tree;
+                _version = tree._version;
+                _index = -1;
                 _current = default;
             }
 
+            /// <inheritdoc/>
             public readonly T Current => _current!;
+            readonly object IEnumerator.Current => _current!;
 
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
-            }
-
-            public readonly void Dispose() { }
-
+            /// <inheritdoc/>
             public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
+                _tree.ThrowIfModified(_version);
 
-                _isStarted = true;
-
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-                    RectangleF searchAABB = _at._tree.AABBs[index];
-
-                    if (AABBTree<T>.Collide(_aabb, searchAABB)) {
-                        if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                            _current = _at._tree.Items[index];
-                            return true;
-                        } else {
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
-                        }
+                Proxy[] proxies = _tree._proxies;
+                while (++_index < proxies.Length) {
+                    if (proxies[_index].Node != NullNode) {
+                        _current = _tree._items[_index];
+                        return true;
                     }
                 }
-                _isDone = true;
+
+                _index = proxies.Length;
                 _current = default;
                 return false;
             }
 
+            /// <inheritdoc/>
             public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
+                _tree.ThrowIfModified(_version);
+                _index = -1;
                 _current = default;
             }
 
-            public readonly IEnumerator<T> GetEnumerator() => this;
+            /// <inheritdoc/>
+            public readonly void Dispose() { }
+
+            private readonly AABBTree<T> _tree;
+            private readonly int _version;
+            private int _index;
+            private T? _current;
+        }
+
+        /// <summary>
+        /// Enumerates the items overlapping an aabb. Use it in a foreach loop.
+        /// </summary>
+        public struct QueryEnumerator : IEnumerator<T>, IEnumerable<T> {
+            internal QueryEnumerator(AABBTree<T> tree, Box box) {
+                _tree = tree;
+                _box = box;
+                _version = tree._version;
+                _stack = null;
+                _sp = -1;
+                _current = default;
+            }
+
+            /// <inheritdoc/>
+            public readonly T Current => _current!;
+            readonly object IEnumerator.Current => _current!;
+
+            /// <inheritdoc/>
+            public bool MoveNext() {
+                _tree.ThrowIfModified(_version);
+                if (_sp < 0) Start();
+
+                // Everything on the stack overlaps the box.
+                ref Node nodes = ref MemoryMarshal.GetArrayDataReference(_tree._nodes);
+                int[] stack = _stack!;
+                int sp = _sp;
+                while (sp > 0) {
+                    int index = stack[--sp];
+                    ref Node node = ref Unsafe.Add(ref nodes, index);
+
+                    if (node.Height == 0) {
+                        _sp = sp;
+                        _current = _tree._items[node.Index];
+                        return true;
+                    }
+
+                    if (sp + 2 > stack.Length) _stack = stack = GrowStack(stack);
+                    int pair = node.Index;
+                    ref Node child1 = ref Unsafe.Add(ref nodes, pair);
+                    ref Node child2 = ref Unsafe.Add(ref child1, 1);
+                    if (child1.Box.Overlaps(_box)) stack[sp++] = pair;
+                    if (child2.Box.Overlaps(_box)) stack[sp++] = pair + 1;
+                }
+
+                _sp = 0;
+                _current = default;
+                return false;
+            }
+            private void Start() {
+                _stack = _tree.RentStack();
+                _sp = 0;
+                if (_tree._nodes[Root].Box.Overlaps(_box)) _stack[_sp++] = Root;
+            }
+
+            /// <inheritdoc/>
+            public void Reset() {
+                _tree.ThrowIfModified(_version);
+                Dispose();
+                _sp = -1;
+            }
+
+            /// <inheritdoc/>
+            public void Dispose() {
+                if (_stack != null) {
+                    _tree.ReturnStack(_stack);
+                    _stack = null;
+                }
+                _current = default;
+            }
+
+            /// <summary>
+            /// Returns this enumerator so that it can be used in a foreach loop.
+            /// </summary>
+            public readonly QueryEnumerator GetEnumerator() => this;
+            readonly IEnumerator<T> IEnumerable<T>.GetEnumerator() => this;
             readonly IEnumerator IEnumerable.GetEnumerator() => this;
 
-            private readonly AABBTree<T> _at;
-            private RectangleF _aabb;
-            private readonly int[] _indexStack;
+            private readonly AABBTree<T> _tree;
+            private readonly Box _box;
+            private readonly int _version;
+            private int[]? _stack;
             private int _sp;
             private T? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
         }
-        private struct QueryAll : IEnumerator<T>, IEnumerable<T> {
-            public QueryAll(AABBTree<T> at) {
-                _at = at;
-                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
-                } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
-                }
-                _isStarted = false;
-                _version = _at._version;
+
+        /// <summary>
+        /// Enumerates the items whose aabb is crossed by a line segment. Use it in a foreach loop.
+        /// </summary>
+        public struct RaycastEnumerator : IEnumerator<T>, IEnumerable<T> {
+            internal RaycastEnumerator(AABBTree<T> tree, Vector2 start, Vector2 end) {
+                _tree = tree;
+                _ray = new Ray(start, end);
+                _version = tree._version;
+                _stack = null;
+                _sp = -1;
                 _current = default;
             }
 
+            /// <inheritdoc/>
             public readonly T Current => _current!;
+            readonly object IEnumerator.Current => _current!;
 
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
-            }
-
-            public readonly void Dispose() { }
-
+            /// <inheritdoc/>
             public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
+                _tree.ThrowIfModified(_version);
+                if (_sp < 0) Start();
 
-                _isStarted = true;
+                // Everything on the stack is hit by the ray.
+                ref Node nodes = ref MemoryMarshal.GetArrayDataReference(_tree._nodes);
+                int[] stack = _stack!;
+                int sp = _sp;
+                while (sp > 0) {
+                    int index = stack[--sp];
+                    ref Node node = ref Unsafe.Add(ref nodes, index);
 
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-
-                    if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                        _current = _at._tree.Items[index];
+                    if (node.Height == 0) {
+                        _sp = sp;
+                        _current = _tree._items[node.Index];
                         return true;
-                    } else {
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
                     }
+
+                    if (sp + 2 > stack.Length) _stack = stack = GrowStack(stack);
+                    sp = _ray.PushChildren(ref nodes, node.Index, stack, sp);
                 }
-                _isDone = true;
+
+                _sp = 0;
                 _current = default;
                 return false;
             }
+            private void Start() {
+                _stack = _tree.RentStack();
+                _sp = 0;
+                if (_ray.Hits(_tree._nodes[Root].Box)) _stack[_sp++] = Root;
+            }
 
+            /// <inheritdoc/>
             public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
+                _tree.ThrowIfModified(_version);
+                Dispose();
+                _sp = -1;
+            }
 
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
+            /// <inheritdoc/>
+            public void Dispose() {
+                if (_stack != null) {
+                    _tree.ReturnStack(_stack);
+                    _stack = null;
+                }
                 _current = default;
             }
 
-            public readonly IEnumerator<T> GetEnumerator() => this;
+            /// <summary>
+            /// Returns this enumerator so that it can be used in a foreach loop.
+            /// </summary>
+            public readonly RaycastEnumerator GetEnumerator() => this;
+            readonly IEnumerator<T> IEnumerable<T>.GetEnumerator() => this;
             readonly IEnumerator IEnumerable.GetEnumerator() => this;
 
-            private readonly AABBTree<T> _at;
-            private readonly int[] _indexStack;
+            private readonly AABBTree<T> _tree;
+            private readonly Ray _ray;
+            private readonly int _version;
+            private int[]? _stack;
             private int _sp;
             private T? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
         }
-        private struct QueryNodes : IEnumerator<RectangleF>, IEnumerable<RectangleF> {
-            public QueryNodes(AABBTree<T> at, RectangleF aabb) {
-                _at = at;
-                _aabb = aabb;
-                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
-                } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
-                }
-                _isStarted = false;
-                _version = _at._version;
-                _current = default;
+
+        internal struct Box(float minX, float minY, float maxX, float maxY) : IEquatable<Box> {
+            public float MinX = minX;
+            public float MinY = minY;
+            public float MaxX = maxX;
+            public float MaxY = maxY;
+
+            public readonly float Perimeter {
+                [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                get => (MaxX - MinX) + (MaxY - MinY);
+            }
+            public readonly Vector2 Center => new((MinX + MaxX) * 0.5f, (MinY + MaxY) * 0.5f);
+
+            public static Box From(Vector2 xy, Vector2 size) => new(xy.X, xy.Y, xy.X + size.X, xy.Y + size.Y);
+            public readonly (Vector2 XY, Vector2 Size) ToTuple() => (new Vector2(MinX, MinY), new Vector2(MaxX - MinX, MaxY - MinY));
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly Box Expand(float v) => new(MinX - v, MinY - v, MaxX + v, MaxY + v);
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public static Box Union(in Box a, in Box b) {
+                return new Box(MathF.Min(a.MinX, b.MinX), MathF.Min(a.MinY, b.MinY), MathF.Max(a.MaxX, b.MaxX), MathF.Max(a.MaxY, b.MaxY));
+            }
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly bool Contains(in Box b) {
+                return MinX <= b.MinX && MinY <= b.MinY && b.MaxX <= MaxX && b.MaxY <= MaxY;
+            }
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly bool Overlaps(in Box b) {
+                return MinX <= b.MaxX && b.MinX <= MaxX && MinY <= b.MaxY && b.MinY <= MaxY;
             }
 
-            public RectangleF Current => _current!.Value;
-
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
-            }
-
-            public readonly void Dispose() { }
-
-            public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _isStarted = true;
-
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-                    RectangleF searchAABB = _at._tree.AABBs[index];
-
-                    if (AABBTree<T>.Collide(_aabb, searchAABB)) {
-                        if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                            _current = _at._tree.AABBs[index];
-                            return true;
-                        } else {
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
-                            _current = _at._tree.AABBs[index];
-                            return true;
-                        }
-                    }
-                }
-                _isDone = true;
-                _current = default;
-                return false;
-            }
-
-            public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
-                _current = default;
-            }
-
-            public readonly IEnumerator<RectangleF> GetEnumerator() => this;
-            readonly IEnumerator IEnumerable.GetEnumerator() => this;
-
-            private readonly AABBTree<T> _at;
-            private RectangleF _aabb;
-            private readonly int[] _indexStack;
-            private int _sp;
-            private RectangleF? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
+            public readonly bool Equals(Box b) => MinX == b.MinX && MinY == b.MinY && MaxX == b.MaxX && MaxY == b.MaxY;
+            public override readonly bool Equals(object? obj) => obj is Box b && Equals(b);
+            public override readonly int GetHashCode() => HashCode.Combine(MinX, MinY, MaxX, MaxY);
         }
-        private struct QueryAllNodes : IEnumerator<RectangleF>, IEnumerable<RectangleF> {
-            public QueryAllNodes(AABBTree<T> at) {
-                _at = at;
-                if (_at._tree.Root != AABB_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[AABB_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
-                } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
-                }
-                _isStarted = false;
-                _version = _at._version;
-                _current = default;
+
+        private struct Ray {
+            public Ray(Vector2 start, Vector2 end) {
+                _start = start;
+                _delta = end - start;
+                // Perpendicular to the segment, used as a separating axis.
+                _normal = new Vector2(-_delta.Y, _delta.X);
+                _absNormal = new Vector2(MathF.Abs(_normal.X), MathF.Abs(_normal.Y));
+                _box = new Box(MathF.Min(start.X, end.X), MathF.Min(start.Y, end.Y), MathF.Max(start.X, end.X), MathF.Max(start.Y, end.Y));
             }
 
-            public RectangleF Current => _current!.Value;
-
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
+            public void Clip(float fraction) {
+                Vector2 end = _start + _delta * fraction;
+                _box = new Box(MathF.Min(_start.X, end.X), MathF.Min(_start.Y, end.Y), MathF.Max(_start.X, end.X), MathF.Max(_start.Y, end.Y));
             }
 
-            public readonly void Dispose() { }
+            // Separating axis test between the segment and a box (Gino van den Bergen, Collision Detection, p80).
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly bool Hits(in Box b) {
+                if (!_box.Overlaps(b)) return false;
 
-            public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
+                // |dot(normal, start - center)| <= dot(|normal|, extents), with both sides doubled.
+                float cx = b.MinX + b.MaxX;
+                float cy = b.MinY + b.MaxY;
+                float distance = MathF.Abs(_normal.X * (2f * _start.X - cx) + _normal.Y * (2f * _start.Y - cy));
+                float radius = _absNormal.X * (b.MaxX - b.MinX) + _absNormal.Y * (b.MaxY - b.MinY);
+                return distance <= radius;
+            }
 
-                _isStarted = true;
+            // Pushes the children that are hit with the closest one last so that it's visited first.
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly int PushChildren(ref Node nodes, int pair, int[] stack, int sp) {
+                ref Node node1 = ref Unsafe.Add(ref nodes, pair);
+                ref Node node2 = ref Unsafe.Add(ref node1, 1);
+                bool hit1 = Hits(node1.Box);
+                bool hit2 = Hits(node2.Box);
 
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-
-                    if (_at._tree.Nodes[index].IndexA == AABB_TREE_NULL_NODE_INDEX) {
-                        _current = _at._tree.AABBs[index];
-                        return true;
+                if (hit1 && hit2) {
+                    float d1 = Vector2.DistanceSquared(node1.Box.Center, _start);
+                    float d2 = Vector2.DistanceSquared(node2.Box.Center, _start);
+                    if (d1 < d2) {
+                        stack[sp++] = pair + 1;
+                        stack[sp++] = pair;
                     } else {
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
-                        _current = _at._tree.AABBs[index];
-                        return true;
+                        stack[sp++] = pair;
+                        stack[sp++] = pair + 1;
                     }
-                }
-                _isDone = true;
-                _current = default;
-                return false;
-            }
-
-            public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+                } else if (hit1) {
+                    stack[sp++] = pair;
+                } else if (hit2) {
+                    stack[sp++] = pair + 1;
                 }
 
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
-                _current = default;
+                return sp;
             }
 
-            public readonly IEnumerator<RectangleF> GetEnumerator() => this;
-            readonly IEnumerator IEnumerable.GetEnumerator() => this;
-
-            private readonly AABBTree<T> _at;
-            private readonly int[] _indexStack;
-            private int _sp;
-            private RectangleF? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
+            private readonly Vector2 _start;
+            private readonly Vector2 _delta;
+            private readonly Vector2 _normal;
+            private readonly Vector2 _absNormal;
+            private Box _box;
         }
 
-        private float _aabbTreeExpandConstant = expandConstant;
-        private float _aabbTreeMoveConstant = moveConstant;
+        private struct Node {
+            public Box Box;
+            // The leaf for leafs, the first child of the pair for internal nodes.
+            public int Index;
+            // 0 for leafs, -1 for empty nodes.
+            public int Height;
 
-        private const int AABB_TREE_STACK_QUERY_CAPACITY = 256;
-        private const int AABB_TREE_NULL_NODE_INDEX = -1;
+            public static readonly Node Empty = new() {
+                Box = new Box(float.PositiveInfinity, float.PositiveInfinity, float.NegativeInfinity, float.NegativeInfinity),
+                Index = NullNode,
+                Height = EmptyHeight,
+            };
+        }
 
-        private AABBTreeT _tree = new(initialCapacity);
-        private PriorityQueue _queue = new(new int[AABB_TREE_STACK_QUERY_CAPACITY], new float[AABB_TREE_STACK_QUERY_CAPACITY]);
+        private struct Proxy {
+            // Where the leaf is in the nodes, -1 when the leaf is free.
+            public int Node;
+            public int Next;
+        }
+
+        private struct BuildItem {
+            public int NodeIndex;
+            public int Pair;
+            public int ChildCount;
+            public int StartIndex;
+            public int SplitIndex;
+            public int EndIndex;
+        }
+
+        private float _expandConstant;
+        private float _moveConstant;
+
+        private const int StackCapacity = 64;
+        private const int NullNode = -1;
+        private const int EmptyHeight = -1;
+        private const int Root = 0;
+
+        private Node[] _nodes = null!;
+        private int[] _parents = null!;
+        private int _nodeEnd;
+        private int _pairFreeList;
+
+        private Proxy[] _proxies = null!;
+        private T[] _items = null!;
+        private int _proxyFreeList;
+
+        private int _count;
         private int _version = 0;
+        private int[]? _stackCache;
+        private readonly Dictionary<T, int> _leaves = [];
     }
 }

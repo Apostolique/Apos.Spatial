@@ -28,7 +28,7 @@ namespace Apos.Spatial {
             return r.X < X + Length && X < r.X + r.Length;
         }
 
-        public override bool Equals(object obj) {
+        public override bool Equals(object? obj) {
             return (obj is Interval r) && this == r;
         }
         public bool Equals(Interval r) {

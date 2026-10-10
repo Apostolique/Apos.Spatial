@@ -16,122 +16,168 @@
     3. This notice may not be removed or altered from any source distribution.
 */
 
+/*
+    The node layout, insertion, rotation, and rebuild algorithms are adapted from Box2D.
+    https://github.com/erincatto/box2d
+    Copyright (c) 2026 Erin Catto
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+*/
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Apos.Spatial {
     /// <summary>
     /// An interval tree is a dynamic partition data structure. It allows you to efficiently query the space in a game world.
     /// </summary>
     /// <typeparam name="T">Type of objects to add to the tree.</typeparam>
-    /// <remarks>
-    /// Creates a new tree.
-    /// </remarks>
-    /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
-    /// <param name="expandConstant">It expands the items that are added so that they don't need to be updated as often. Defaults to 2f.</param>
-    /// <param name="moveConstant">It expands the items that are moved so that they don't need to be updated as much. Defaults to 4f.</param>
-    public class IntervalTree<T>(int initialCapacity = 64, float expandConstant = 2f, float moveConstant = 4f) : IEnumerable<T> {
+    public class IntervalTree<T> : IEnumerable<T> where T : notnull {
+        /// <summary>
+        /// Creates a new tree.
+        /// </summary>
+        /// <param name="initialCapacity">Amount of items the tree can hold before it needs to be resized.</param>
+        /// <param name="expandConstant">It expands the items that are added so that they don't need to be updated as often. Defaults to 2f.</param>
+        /// <param name="moveConstant">It expands the items that are moved so that they don't need to be updated as much. Defaults to 4f.</param>
+        public IntervalTree(int initialCapacity = 64, float expandConstant = 2f, float moveConstant = 4f) {
+            _expandConstant = expandConstant;
+            _moveConstant = moveConstant;
+            Initialize(initialCapacity);
+        }
+
         /// <summary>
         /// Used for the broad phase search.
         /// It expands the items that are added so that they don't need to be updated as often.
         /// </summary>
         public float ExpandConstant {
-            get => _intervalTreeExpandConstant;
-            set {
-                _intervalTreeExpandConstant = value;
-            }
+            get => _expandConstant;
+            set => _expandConstant = value;
         }
         /// <summary>
         /// Used for the broad phase search.
         /// It expands the items that are moved so that they don't need to be updated as much.
         /// </summary>
         public float MoveConstant {
-            get => _intervalTreeMoveConstant;
-            set {
-                _intervalTreeMoveConstant = value;
-            }
+            get => _moveConstant;
+            set => _moveConstant = value;
         }
         /// <summary>
         /// Amount of nodes in the tree.
         /// </summary>
-        public int NodeCount => _tree.NodeCount;
+        public int NodeCount => _count == 0 ? 0 : 2 * _count - 1;
         /// <summary>
         /// Amount of items in the tree.
         /// </summary>
-        public int Count => _tree.Count;
+        public int Count => _count;
 
         /// <summary>
         /// Bounds of all the items in the tree.
         /// </summary>
-        public Interval? Bounds => _tree.Root != INTERVAL_TREE_NULL_NODE_INDEX ? _tree.Intervals[_tree.Root] : null;
+        public Interval? Bounds => _count > 0 ? _nodes[Root].Span.ToInterval() : null;
 
         /// <summary>
         /// Adds a new leaf to the tree, and rebalances as necessary.
+        /// An item can only be added once to the same tree.
         /// </summary>
         /// <param name="interval">An interval for the item.</param>
         /// <param name="item">The item to add to the tree.</param>
-        /// <returns>The item's leaf. Use this to update or remove the item later.</returns>
+        /// <returns>
+        /// The item's leaf. You can use it to update or remove the item later without a lookup.
+        /// You can also ignore it and use the item instead.
+        /// </returns>
         public int Add(Interval interval, T item) {
-            _tree.Count++;
-            // Expand interval before adding.
-            return InternalAdd(Expand(interval, _intervalTreeExpandConstant), item);
+            ArgumentNullException.ThrowIfNull(item);
+            if (_leaves.ContainsKey(item)) {
+                throw new ArgumentException("The item is already in the tree.", nameof(item));
+            }
+
+            int leaf = AllocateProxy();
+            _leaves.Add(item, leaf);
+            _items[leaf] = item;
+            InsertLeaf(leaf, Span.From(interval).Expand(_expandConstant));
+
+            _count++;
+            _version++;
+
+            return leaf;
         }
 
         /// <summary>
+        /// Removes an item from the tree, and rebalances as necessary.
+        /// </summary>
+        /// <param name="item">The item to remove.</param>
+        /// <returns>True if the item was in the tree, false otherwise.</returns>
+        public bool Remove(T item) {
+            if (!_leaves.TryGetValue(item, out int leaf)) return false;
+
+            Remove(leaf);
+
+            return true;
+        }
+        /// <summary>
         /// Removes a leaf from the tree, and rebalances as necessary.
         /// </summary>
+        /// <param name="leaf">The leaf to remove.</param>
         /// <returns>-1 since the leaf is no longer in the tree.</returns>
         public int Remove(int leaf) {
-            if (leaf == INTERVAL_TREE_NULL_NODE_INDEX) return INTERVAL_TREE_NULL_NODE_INDEX;
+            if (leaf == NullNode) return NullNode;
+            ThrowIfNotLeaf(leaf);
 
-            _tree.Count--;
-            int index = leaf;
-            if (_tree.Root == index) {
-                _tree.Root = INTERVAL_TREE_NULL_NODE_INDEX;
-            } else {
-                ref IntervalTreeT.NodeT node = ref _tree.Nodes[index];
-                int indexParent = node.IndexParent;
-                ref IntervalTreeT.NodeT parent = ref _tree.Nodes[indexParent];
+            _leaves.Remove(_items[leaf]);
+            RemoveLeaf(leaf);
+            FreeProxy(leaf);
 
-                if (indexParent == _tree.Root) {
-                    if (parent.IndexA == index) _tree.Root = parent.IndexB;
-                    else _tree.Root = parent.IndexA;
-                    _tree.Nodes[_tree.Root].IndexParent = INTERVAL_TREE_NULL_NODE_INDEX;
-                } else {
-                    int indexGrandparent = parent.IndexParent;
-                    ref IntervalTreeT.NodeT grandparent = ref _tree.Nodes[indexGrandparent];
-
-                    if (parent.IndexA == index) {
-                        ref IntervalTreeT.NodeT sindexBling = ref _tree.Nodes[parent.IndexB];
-                        sindexBling.IndexParent = indexGrandparent;
-                        if (grandparent.IndexA == indexParent) grandparent.IndexA = parent.IndexB;
-                        else grandparent.IndexB = parent.IndexB;
-                    } else {
-                        ref IntervalTreeT.NodeT sindexBling = ref _tree.Nodes[parent.IndexA];
-                        sindexBling.IndexParent = indexGrandparent;
-                        if (grandparent.IndexA == indexParent) grandparent.IndexA = parent.IndexA;
-                        else grandparent.IndexB = parent.IndexA;
-                    }
-                    SRefitHierarchy(indexGrandparent);
-                }
-                SPushFreelist(indexParent);
-            }
-            SPushFreelist(index);
-
+            _count--;
             _version++;
 
-            return INTERVAL_TREE_NULL_NODE_INDEX;
+            return NullNode;
         }
         /// <summary>
         /// Clears the whole tree.
         /// </summary>
-        /// <param name="initialCapacity">Amount of nodes the tree can hold before it needs to be resized.</param>
+        /// <param name="initialCapacity">Amount of items the tree can hold before it needs to be resized.</param>
         public void Clear(int initialCapacity = 64) {
-            _tree = new IntervalTreeT(initialCapacity);
+            Initialize(initialCapacity);
+            _leaves.Clear();
             _version++;
         }
 
+        /// <summary>
+        /// Returns true if the item is in the tree.
+        /// </summary>
+        /// <param name="item">The item to look for.</param>
+        public bool Contains(T item) {
+            return _leaves.ContainsKey(item);
+        }
+
+        /// <summary>
+        /// Use this function when an item's interval needs to be updated. Items need to be updated whenever the shape
+        /// inside the item's interval moves. Internally there are some optimizations so that the tree is only
+        /// adjusted if the interval is moved enough.
+        /// </summary>
+        /// <param name="item">The item to update.</param>
+        /// <param name="interval">The new interval.</param>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
+        public bool Update(T item, Interval interval) {
+            return Move(GetLeaf(item), interval, 0f);
+        }
         /// <summary>
         /// Use this function when an interval needs to be updated. Leafs need to be updated whenever the shape
         /// inside the leaf's interval moves. Internally there are some optimizations so that the tree is only
@@ -139,24 +185,26 @@ namespace Apos.Spatial {
         /// </summary>
         /// <param name="leaf">The leaf to update.</param>
         /// <param name="interval">The new interval.</param>
-        /// <returns>Returns true if the leaf was updated, false otherwise.</returns>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
         public bool Update(int leaf, Interval interval) {
-            if (Contains(_tree.Intervals[leaf], interval)) {
-                _tree.Intervals[leaf] = interval;
-                return false;
-            }
-
-            T item = _tree.Items[leaf]!;
-            Remove(leaf);
-            Add(interval, item);
-
-            _version++;
-
-            return true;
+            return Move(leaf, interval, 0f);
         }
 
         /// <summary>
-        /// Updates a leaf with a new interval (if needed) with the new `interval` and an `offset` for how far the new
+        /// Updates an item with a new interval (if needed) and an `offset` for how far the new
+        /// interval will be moving.
+        /// This function does more optimizations than `Update` by attempting to use the `offset`
+        /// to predict motion and avoid restructuring of the tree.
+        /// </summary>
+        /// <param name="item">The item to update.</param>
+        /// <param name="interval">The new interval.</param>
+        /// <param name="offset">An offset that represents the direction the interval is moving in.</param>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
+        public bool Move(T item, Interval interval, float offset) {
+            return Move(GetLeaf(item), interval, offset);
+        }
+        /// <summary>
+        /// Updates a leaf with a new interval (if needed) and an `offset` for how far the new
         /// interval will be moving.
         /// This function does more optimizations than `Update` by attempting to use the `offset`
         /// to predict motion and avoid restructuring of the tree.
@@ -164,30 +212,28 @@ namespace Apos.Spatial {
         /// <param name="leaf">The leaf to update.</param>
         /// <param name="interval">The new interval.</param>
         /// <param name="offset">An offset that represents the direction the interval is moving in.</param>
-        /// <returns>Returns true if the leaf was updated, false otherwise.</returns>
+        /// <returns>Returns true if the tree was restructured, false otherwise.</returns>
         public bool Move(int leaf, Interval interval, float offset) {
-            interval = Expand(interval, _intervalTreeExpandConstant);
-            float delta = offset * _intervalTreeMoveConstant;
+            ThrowIfNotLeaf(leaf);
 
-            if (delta < 0) {
-                interval.X += delta;
-                interval.Length -= delta;
-            } else {
-                interval.Length += delta;
-            }
+            Span span = Span.From(interval);
+            Span fat = span.Expand(_expandConstant);
+            float delta = offset * _moveConstant;
 
-            Interval oldInterval = _tree.Intervals[leaf];
-            if (Contains(oldInterval, interval)) {
-                Interval bigInterval = Expand(interval, _intervalTreeMoveConstant);
-                bool oldIntervalIsNotWayTooHuge = Contains(bigInterval, oldInterval);
-                if (oldIntervalIsNotWayTooHuge) {
+            if (delta < 0f) fat.Min += delta;
+            else fat.Max += delta;
+
+            Span old = _nodes[_proxies[leaf].Node].Span;
+            if (old.Contains(span)) {
+                // The leaf still holds the item but it might be way too big if the item stopped moving or shrank.
+                Span huge = fat.Expand(4f * _expandConstant);
+                if (huge.Contains(old)) {
                     return false;
                 }
             }
 
-            T item = _tree.Items[leaf]!;
-            Remove(leaf);
-            InternalAdd(interval, item);
+            RemoveLeaf(leaf);
+            InsertLeaf(leaf, fat);
 
             _version++;
 
@@ -195,781 +241,840 @@ namespace Apos.Spatial {
         }
 
         /// <summary>
+        /// Rebuilds the whole tree from scratch. Leafs stay valid.
+        /// This can produce a better tree after adding a lot of items at once, for example when loading a level.
+        /// </summary>
+        public void Rebuild() {
+            if (_count <= 1) return;
+
+            Node[] leaves = new Node[_count];
+            int[] order = new int[_count];
+            float[] centers = new float[_count];
+            int leafCount = 0;
+
+            int[] stack = RentStack();
+            int sp = 0;
+            stack[sp++] = Root;
+            while (sp > 0) {
+                ref Node node = ref _nodes[stack[--sp]];
+                if (node.Height == 0) {
+                    leaves[leafCount] = node;
+                    order[leafCount] = leafCount;
+                    centers[leafCount] = node.Span.Center;
+                    leafCount++;
+                } else {
+                    if (sp + 2 > stack.Length) stack = GrowStack(stack);
+                    stack[sp++] = node.Index;
+                    stack[sp++] = node.Index + 1;
+                }
+            }
+            ReturnStack(stack);
+
+            BuildTree(leaves, order, centers, leafCount);
+
+            _version++;
+        }
+
+        /// <summary>
+        /// Returns the item's leaf.
+        /// </summary>
+        /// <param name="item">The item to lookup.</param>
+        public int GetLeaf(T item) {
+            if (!_leaves.TryGetValue(item, out int leaf)) {
+                throw new ArgumentException("The item isn't in the tree.", nameof(item));
+            }
+            return leaf;
+        }
+        /// <summary>
         /// Returns the internal "expanded" interval. This is useful for when you want to generate all pairs of
         /// potential overlaps for a specific leaf. Just simply use `Query` on the the return value
         /// of this function.
         /// </summary>
         /// <param name="leaf">The leaf to lookup.</param>
         public Interval GetInterval(int leaf) {
-            return _tree.Intervals[leaf];
+            ThrowIfNotLeaf(leaf);
+            return _nodes[_proxies[leaf].Node].Span.ToInterval();
         }
         /// <summary>
         /// Returns the `item` from `Add`.
         /// </summary>
         /// <param name="leaf">The leaf to lookup.</param>
         public T GetItem(int leaf) {
-            return _tree.Items[leaf];
+            ThrowIfNotLeaf(leaf);
+            return _items[leaf];
         }
 
         /// <summary>
         /// Returns every item in the tree. Used implicitly by foreach loops.
         /// </summary>
-        public IEnumerator<T> GetEnumerator() {
-            return new QueryAll(this);
+        public Enumerator GetEnumerator() {
+            return new Enumerator(this);
+        }
+        IEnumerator<T> IEnumerable<T>.GetEnumerator() {
+            return new Enumerator(this);
         }
         IEnumerator IEnumerable.GetEnumerator() {
-            return new QueryAll(this);
+            return new Enumerator(this);
         }
 
         /// <summary>
-        /// Finds all items overlapping the Vector2 `v`.
+        /// Finds all items overlapping the position `v`.
         /// </summary>
         /// <param name="v">The position to query.</param>
-        public IEnumerable<T> Query(float v) {
-            return new QueryInterval(this, new Interval(v, 0f));
+        public QueryEnumerator Query(float v) {
+            return new QueryEnumerator(this, new Span(v, v));
         }
         /// <summary>
-        /// Finds all items overlapping the Vector2 `interval`.
+        /// Finds all items overlapping the `interval`.
         /// </summary>
         /// <param name="interval">The interval to query.</param>
-        public IEnumerable<T> Query(Interval interval) {
-            return new QueryInterval(this, interval);
+        public QueryEnumerator Query(Interval interval) {
+            return new QueryEnumerator(this, Span.From(interval));
         }
+
         /// <summary>
-        /// Mostly used for debugging. It returns all the `interval` in the tree including parent nodes.
+        /// Mostly used for debugging. It returns all the intervals in the tree including parent nodes.
         /// </summary>
         /// <param name="interval">The interval to query.</param>
         public IEnumerable<Interval> DebugNodes(Interval interval) {
-            return new QueryNodes(this, interval);
+            return DebugNodes(Span.From(interval));
         }
         /// <summary>
-        /// Mostly used for debugging. It returns all the `interval` in the tree including parent nodes.
+        /// Mostly used for debugging. It returns all the intervals in the tree including parent nodes.
         /// </summary>
         public IEnumerable<Interval> DebugAllNodes() {
-            return new QueryAllNodes(this);
+            return DebugNodes(new Span(float.NegativeInfinity, float.PositiveInfinity));
+        }
+        private IEnumerable<Interval> DebugNodes(Span span) {
+            if (_count == 0) yield break;
+
+            int version = _version;
+            Stack<int> stack = new();
+            stack.Push(Root);
+            while (stack.Count > 0) {
+                Node node = _nodes[stack.Pop()];
+                if (!node.Span.Overlaps(span)) continue;
+
+                yield return node.Span.ToInterval();
+                ThrowIfModified(version);
+
+                if (node.Height > 0) {
+                    stack.Push(node.Index + 1);
+                    stack.Push(node.Index);
+                }
+            }
         }
 
-        private int InternalAdd(Interval interval, T item) {
-            // Make a new node.
-            int newIndex = SPopFreelist(interval, item);
-            int searchIndex = _tree.Root;
+        internal int Height => _count > 0 ? _nodes[Root].Height : 0;
 
-            // Empty tree, make new root.
-            if (searchIndex == INTERVAL_TREE_NULL_NODE_INDEX) {
-                _tree.Root = newIndex;
+        internal void Validate() {
+            if (_parents[Root] != NullNode) throw new InvalidOperationException("Root has a parent.");
+            if (_nodes[Root + 1].Height != EmptyHeight) throw new InvalidOperationException("The node beside the root isn't empty.");
+
+            int freePairs = 0;
+            for (int pair = _pairFreeList; pair != NullNode; pair = _parents[pair]) {
+                if (_nodes[pair].Height != EmptyHeight || _nodes[pair + 1].Height != EmptyHeight) throw new InvalidOperationException("Free pair isn't empty.");
+                freePairs++;
+            }
+            if (_nodeEnd != 2 * Math.Max(_count, 1) + 2 * freePairs) throw new InvalidOperationException("Leaked nodes.");
+
+            int freeProxies = 0;
+            for (int i = _proxyFreeList; i != NullNode; i = _proxies[i].Next) {
+                if (_proxies[i].Node != NullNode) throw new InvalidOperationException("Free proxy points to a node.");
+                freeProxies++;
+            }
+            if (freeProxies + _count != _proxies.Length) throw new InvalidOperationException("Leaked proxies.");
+
+            int leafCount = 0;
+            if (_count == 0) {
+                if (_nodes[Root].Height != EmptyHeight) throw new InvalidOperationException("Empty tree has a root.");
             } else {
-                searchIndex = SBranchAndBoundFindOptimalSibling(interval);
+                ValidateSubtree(Root, ref leafCount);
+            }
+            if (leafCount != _count) throw new InvalidOperationException($"Expected {_count} leaves, found {leafCount}.");
+            if (_leaves.Count != _count) throw new InvalidOperationException("The item lookup is out of sync.");
+        }
+        private int ValidateSubtree(int index, ref int leafCount) {
+            ref Node node = ref _nodes[index];
+            if (node.Height == 0) {
+                if (_proxies[node.Index].Node != index) throw new InvalidOperationException("Proxy doesn't point to its leaf.");
+                if (_leaves[_items[node.Index]] != node.Index) throw new InvalidOperationException("Item doesn't map to its leaf.");
+                leafCount++;
+                return 0;
+            }
+            if (node.Height < 0) throw new InvalidOperationException("Empty node in the tree.");
 
-                // Make new branch node.
-                int branchIndex = SPopFreelist(Interval.Union(interval, _tree.Intervals[searchIndex]));
-                ref IntervalTreeT.NodeT branch = ref _tree.Nodes[branchIndex];
-                int parentIndex = _tree.Nodes[searchIndex].IndexParent;
+            int pair = node.Index;
+            if ((pair & 1) != 0 || pair < 2 || pair >= _nodeEnd) throw new InvalidOperationException("Bad pair.");
+            if (_parents[pair] != index || _parents[pair + 1] != index) throw new InvalidOperationException("Bad parent.");
 
-                if (parentIndex == INTERVAL_TREE_NULL_NODE_INDEX) {
-                    _tree.Root = branchIndex;
-                } else {
-                    ref IntervalTreeT.NodeT parent = ref _tree.Nodes[parentIndex];
+            Span union = Span.Union(_nodes[pair].Span, _nodes[pair + 1].Span);
+            if (!node.Span.Equals(union)) throw new InvalidOperationException("Node isn't the union of its children.");
 
-                    // Hookup parent to the new branch.
-                    if (parent.IndexA == searchIndex) {
-                        parent.IndexA = branchIndex;
-                    } else {
-                        parent.IndexB = branchIndex;
-                    }
-                }
+            int height1 = ValidateSubtree(pair, ref leafCount);
+            int height2 = ValidateSubtree(pair + 1, ref leafCount);
+            if (node.Height != 1 + Math.Max(height1, height2)) throw new InvalidOperationException("Bad height.");
+            return node.Height;
+        }
 
-                // Assign branch children and parent.
-                branch.IndexA = searchIndex;
-                branch.IndexB = newIndex;
-                branch.IndexParent = parentIndex;
-                branch.Height = _tree.Nodes[searchIndex].Height + 1;
+        private void Initialize(int initialCapacity) {
+            int capacity = Math.Max(initialCapacity, 16);
 
-                // Assign parent pointers for new the leaf pair, and heights.
-                _tree.Nodes[searchIndex].IndexParent = branchIndex;
-                _tree.Nodes[newIndex].IndexParent = branchIndex;
+            // A tree of n items has 2n - 1 nodes plus the empty node beside the root.
+            _nodes = new Node[2 * capacity];
+            _parents = new int[2 * capacity];
+            _nodes[Root] = Node.Empty;
+            _nodes[Root + 1] = Node.Empty;
+            _parents[Root] = NullNode;
+            _parents[Root + 1] = NullNode;
+            _nodeEnd = 2;
+            _pairFreeList = NullNode;
 
-                SRefitHierarchy(parentIndex);
+            _proxies = new Proxy[capacity];
+            _items = new T[capacity];
+            LinkFreeProxies(0);
+
+            _count = 0;
+        }
+
+        private void LinkFreeProxies(int start) {
+            for (int i = start; i < _proxies.Length; i++) {
+                _proxies[i].Node = NullNode;
+                _proxies[i].Next = i + 1;
+            }
+            _proxies[^1].Next = NullNode;
+            _proxyFreeList = start;
+        }
+        private int AllocateProxy() {
+            if (_proxyFreeList == NullNode) {
+                int oldCapacity = _proxies.Length;
+                Array.Resize(ref _proxies, oldCapacity * 2);
+                Array.Resize(ref _items, oldCapacity * 2);
+                LinkFreeProxies(oldCapacity);
             }
 
-            _version++;
-
-            return newIndex;
+            int leaf = _proxyFreeList;
+            _proxyFreeList = _proxies[leaf].Next;
+            _proxies[leaf].Next = NullNode;
+            return leaf;
         }
-        private int SBalance(int indexA) {
-            //      a
-            //    /   \
-            //   b     c
-            //  / \   / \
-            // d   e f   g
+        private void FreeProxy(int leaf) {
+            _proxies[leaf].Node = NullNode;
+            _proxies[leaf].Next = _proxyFreeList;
+            _items[leaf] = default!;
+            _proxyFreeList = leaf;
+        }
 
-            ref IntervalTreeT.NodeT a = ref _tree.Nodes[indexA];
-            int indexB = a.IndexA;
-            int indexC = a.IndexB;
-            if (a.IndexA == INTERVAL_TREE_NULL_NODE_INDEX || a.Height < 2) return indexA;
-
-            ref IntervalTreeT.NodeT b = ref _tree.Nodes[indexB];
-            ref IntervalTreeT.NodeT c = ref _tree.Nodes[indexC];
-            int balance = c.Height - b.Height;
-
-            // Rotate c up.
-            if (balance > 1) {
-                int indexF = c.IndexA;
-                int indexG = c.IndexB;
-                ref IntervalTreeT.NodeT f = ref _tree.Nodes[indexF];
-                ref IntervalTreeT.NodeT g = ref _tree.Nodes[indexG];
-
-                // Swap a and c.
-                c.IndexA = indexA;
-                c.IndexParent = a.IndexParent;
-                a.IndexParent = indexC;
-
-                // Hookup a's old parent to c.
-                if (c.IndexParent != INTERVAL_TREE_NULL_NODE_INDEX) {
-                    if (_tree.Nodes[c.IndexParent].IndexA == indexA) {
-                        _tree.Nodes[c.IndexParent].IndexA = indexC;
-                    } else {
-                        _tree.Nodes[c.IndexParent].IndexB = indexC;
-                    }
-                } else {
-                    _tree.Root = indexC;
-                }
-
-                // Rotation, picking f or g to go under a or c respectively.
-                //       c
-                //      / \
-                //     a   ? (f or g)
-                //    / \
-                //   b   ? (f or g)
-                //  / \
-                // d   e
-                if (f.Height > g.Height) {
-                    c.IndexB = indexF;
-                    a.IndexB = indexG;
-                    g.IndexParent = indexA;
-                    _tree.Intervals[indexA] = Interval.Union(_tree.Intervals[indexB], _tree.Intervals[indexG]);
-                    _tree.Intervals[indexC] = Interval.Union(_tree.Intervals[indexA], _tree.Intervals[indexF]);
-
-                    a.Height = Math.Max(b.Height, g.Height) + 1;
-                    c.Height = Math.Max(a.Height, f.Height) + 1;
-                } else {
-                    c.IndexB = indexG;
-                    a.IndexB = indexF;
-                    f.IndexParent = indexA;
-                    _tree.Intervals[indexA] = Interval.Union(_tree.Intervals[indexB], _tree.Intervals[indexF]);
-                    _tree.Intervals[indexC] = Interval.Union(_tree.Intervals[indexA], _tree.Intervals[indexG]);
-
-                    a.Height = Math.Max(b.Height, f.Height) + 1;
-                    c.Height = Math.Max(a.Height, g.Height) + 1;
-                }
-
-                return indexC;
-            } else if (balance < -1) {
-                // Rotate b up.
-
-                int indexD = b.IndexA;
-                int indexE = b.IndexB;
-                ref IntervalTreeT.NodeT d = ref _tree.Nodes[indexD];
-                ref IntervalTreeT.NodeT e = ref _tree.Nodes[indexE];
-
-                // Swap a and b.
-                b.IndexA = indexA;
-                b.IndexParent = a.IndexParent;
-                a.IndexParent = indexB;
-
-                // Hookup a's old parent to b.
-                if (b.IndexParent != INTERVAL_TREE_NULL_NODE_INDEX) {
-                    if (_tree.Nodes[b.IndexParent].IndexA == indexA) {
-                        _tree.Nodes[b.IndexParent].IndexA = indexB;
-                    } else {
-                        _tree.Nodes[b.IndexParent].IndexB = indexB;
-                    }
-                } else {
-                    _tree.Root = indexB;
-                }
-
-                // Rotation, picking d or e to go under a or b respectively.
-                //            b
-                //           / \
-                // (d or e) ?   a
-                //             / \
-                //   (d or e) ?   c
-                //               / \
-                //              f   g
-                if (d.Height > e.Height) {
-                    b.IndexB = indexD;
-                    a.IndexA = indexE;
-                    e.IndexParent = indexA;
-                    _tree.Intervals[indexA] = Interval.Union(_tree.Intervals[indexC], _tree.Intervals[indexE]);
-                    _tree.Intervals[indexB] = Interval.Union(_tree.Intervals[indexA], _tree.Intervals[indexD]);
-
-                    a.Height = Math.Max(c.Height, e.Height) + 1;
-                    b.Height = Math.Max(a.Height, d.Height) + 1;
-                } else {
-                    b.IndexB = indexE;
-                    a.IndexA = indexD;
-                    d.IndexParent = indexA;
-                    _tree.Intervals[indexA] = Interval.Union(_tree.Intervals[indexC], _tree.Intervals[indexD]);
-                    _tree.Intervals[indexB] = Interval.Union(_tree.Intervals[indexA], _tree.Intervals[indexE]);
-
-                    a.Height = Math.Max(c.Height, d.Height) + 1;
-                    b.Height = Math.Max(a.Height, e.Height) + 1;
-                }
-
-                return indexB;
+        // Children are allocated in pairs so that siblings sit next to each other in memory.
+        // Free pairs are chained through the parent of their first node.
+        private int AllocatePair() {
+            if (_pairFreeList != NullNode) {
+                int free = _pairFreeList;
+                _pairFreeList = _parents[free];
+                return free;
             }
 
-            return indexA;
+            if (_nodeEnd + 2 > _nodes.Length) {
+                Array.Resize(ref _nodes, _nodes.Length * 2);
+                Array.Resize(ref _parents, _parents.Length * 2);
+            }
+
+            int pair = _nodeEnd;
+            _nodeEnd += 2;
+            return pair;
+        }
+        private void FreePair(int pair) {
+            _nodes[pair] = Node.Empty;
+            _nodes[pair + 1] = Node.Empty;
+            _parents[pair] = _pairFreeList;
+            _parents[pair + 1] = NullNode;
+            _pairFreeList = pair;
         }
 
-        private void SSyncNode(int index) {
-            ref IntervalTreeT.NodeT node = ref _tree.Nodes[index];
-            int indexA = node.IndexA;
-            int indexB = node.IndexB;
-            node.Height = Math.Max(_tree.Nodes[indexA].Height, _tree.Nodes[indexB].Height) + 1;
-            _tree.Intervals[index] = Interval.Union(_tree.Intervals[indexA], _tree.Intervals[indexB]);
-        }
-
-        private void SRefitHierarchy(int index) {
-            while (index != INTERVAL_TREE_NULL_NODE_INDEX) {
-                index = SBalance(index);
-                SSyncNode(index);
-                index = _tree.Nodes[index].IndexParent;
+        // A node moved to `index`, the nodes under it need to know.
+        private void LinkChildren(int index) {
+            ref Node node = ref _nodes[index];
+            if (node.Height == 0) {
+                _proxies[node.Index].Node = index;
+            } else {
+                _parents[node.Index] = index;
+                _parents[node.Index + 1] = index;
             }
         }
 
-        private void EnsureSize<K>(ref K[] array, int newCapacity) {
-            if (array.Length < newCapacity) {
-                Array.Resize(ref array, newCapacity);
-            }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Node MakeInternal(Node[] nodes, int pair) {
+            ref Node child1 = ref nodes[pair];
+            ref Node child2 = ref nodes[pair + 1];
+            return new Node {
+                Span = Span.Union(child1.Span, child2.Span),
+                Index = pair,
+                Height = 1 + Math.Max(child1.Height, child2.Height),
+            };
         }
 
-        private int SPopFreelist(Interval interval, T item = default!) {
-            int newIndex = _tree.Freelist;
-            if (newIndex == INTERVAL_TREE_NULL_NODE_INDEX) {
-                int newCapacity = _tree.NodeCapacity * 2;
-                EnsureSize(ref _tree.Nodes, newCapacity);
-                EnsureSize(ref _tree.Intervals, newCapacity);
-                EnsureSize(ref _tree.Items, newCapacity);
+        // Greedy search for the sibling that adds the least length to the tree.
+        // There are three choices for a new leaf D under a node A with children B and C:
+        // 1: D becomes the sibling of A.
+        // 2: D goes somewhere under B.
+        // 3: D goes somewhere under C.
+        // The descent picks the child with the lowest lower bound cost and stops once no child can beat the best cost.
+        private int FindBestSibling(Span spanD) {
+            Node[] nodes = _nodes;
+            float centerD = spanD.Center;
+            float lengthD = spanD.Length;
 
-                // Link up new freelist and attach it to pre-existing freelist.
-                for (int i = 0; i < _tree.NodeCapacity - 1; i++) {
-                    _tree.Nodes[_tree.NodeCapacity + i].IndexA = i + _tree.NodeCapacity + 1;
-                }
-                _tree.Nodes[newCapacity - 1].IndexA = INTERVAL_TREE_NULL_NODE_INDEX;
-                _tree.Freelist = _tree.NodeCapacity;
-                newIndex = _tree.Freelist;
-                _tree.NodeCapacity = newCapacity;
-            }
+            int index = Root;
+            if (nodes[index].Height == 0) return index;
 
-            _tree.Freelist = _tree.Nodes[newIndex].IndexA;
-            _tree.Nodes[newIndex].IndexA = INTERVAL_TREE_NULL_NODE_INDEX;
-            _tree.Nodes[newIndex].IndexB = INTERVAL_TREE_NULL_NODE_INDEX;
-            _tree.Nodes[newIndex].IndexParent = INTERVAL_TREE_NULL_NODE_INDEX;
-            _tree.Nodes[newIndex].Height = 0;
-            _tree.Intervals[newIndex] = interval;
-            _tree.Items[newIndex] = item;
+            Span rootSpan = nodes[index].Span;
+            float lengthBase = rootSpan.Length;
+            float directCost = Span.Union(rootSpan, spanD).Length;
+            float inheritedCost = 0f;
 
-            _tree.NodeCount++;
+            int bestSibling = index;
+            float bestCost = directCost;
 
-            return newIndex;
-        }
+            while (true) {
+                int child1 = nodes[index].Index;
+                int child2 = child1 + 1;
 
-        private void SPushFreelist(int index) {
-            _tree.Nodes[index].IndexA = _tree.Freelist;
-            _tree.Items[index] = default!;
-            _tree.Freelist = index;
-            _tree.NodeCount--;
-        }
-
-        private float SDeltaCost(Interval toInsert, Interval candidate) {
-            return SurfaceArea(Interval.Union(toInsert, candidate)) - SurfaceArea(candidate);
-        }
-
-        // https://en.wikipedia.org/wiki/Branch_and_bound#Generic_version
-        private int SBranchAndBoundFindOptimalSibling(Interval toInsert) {
-            _queue.Reset();
-            _queue.Push(_tree.Root, SDeltaCost(toInsert, _tree.Intervals[_tree.Root]));
-
-            float toInsertSA = SurfaceArea(toInsert);
-            float bestCost = float.MaxValue;
-            int bestIndex = INTERVAL_TREE_NULL_NODE_INDEX;
-            int searchIndex = 0;
-            float searchDeltaCost = 0;
-            while (_queue.TryPop(ref searchIndex, ref searchDeltaCost)) {
-                // Track the best candidate so far.
-                Interval searchInterval = _tree.Intervals[searchIndex];
-                float cost = SurfaceArea(Interval.Union(toInsert, searchInterval)) + searchDeltaCost;
+                // Cost of creating a new parent for this node and the new leaf.
+                float cost = directCost + inheritedCost;
                 if (cost < bestCost) {
+                    bestSibling = index;
                     bestCost = cost;
-                    bestIndex = searchIndex;
                 }
 
-                // Consider pushing the candidate's children onto the priority queue.
-                // Cull subtrees with lower bound metric.
-                float deltaCost = SDeltaCost(toInsert, searchInterval) + searchDeltaCost;
-                float lowerBound = toInsertSA + deltaCost;
-                if (lowerBound < bestCost) {
-                    int indexA = _tree.Nodes[searchIndex].IndexA;
-                    int indexB = _tree.Nodes[searchIndex].IndexB;
-                    if (indexA != INTERVAL_TREE_NULL_NODE_INDEX) {
-                        _queue.Push(indexA, deltaCost);
-                        _queue.Push(indexB, deltaCost);
+                // Inheritance cost seen by the children.
+                inheritedCost += directCost - lengthBase;
+
+                ref Node node1 = ref nodes[child1];
+                ref Node node2 = ref nodes[child2];
+                bool leaf1 = node1.Height == 0;
+                bool leaf2 = node2.Height == 0;
+
+                float lowerCost1 = float.MaxValue;
+                float directCost1 = Span.Union(node1.Span, spanD).Length;
+                float length1 = 0f;
+                if (leaf1) {
+                    float cost1 = directCost1 + inheritedCost;
+                    if (cost1 < bestCost) {
+                        bestSibling = child1;
+                        bestCost = cost1;
                     }
-                }
-            }
-
-            return bestIndex;
-        }
-
-        private float STreeCost(int index) {
-            if (index == INTERVAL_TREE_NULL_NODE_INDEX) return 0;
-            float costA = STreeCost(_tree.Nodes[index].IndexA);
-            float costB = STreeCost(_tree.Nodes[index].IndexB);
-            float myCost = SurfaceArea(_tree.Intervals[index]);
-            return costA + costB + myCost;
-        }
-
-        private static Interval Expand(Interval interval, float v) {
-            return new Interval(interval.X - v, interval.Length + v * 2f);
-        }
-        private static float SurfaceArea(Interval a) {
-            return a.Length;
-        }
-        private static bool Contains(Interval a, Interval b) {
-            return a.X <= b.X && b.X + b.Length <= a.X + a.Length;
-        }
-        private static bool Collide(Interval a, Interval b) {
-            bool d0 = b.X + b.Length < a.X;
-            bool d1 = a.X + a.Length < b.X;
-            return !(d0 || d1);
-        }
-
-        private struct IntervalTreeT {
-            public IntervalTreeT(int initialCapacity = 0) {
-                if (initialCapacity == 0) initialCapacity = 64;
-                Nodes = new NodeT[initialCapacity];
-                Intervals = new Interval[initialCapacity];
-                Items = new T[initialCapacity];
-                Root = INTERVAL_TREE_NULL_NODE_INDEX;
-                Freelist = 0;
-                NodeCapacity = initialCapacity;
-                NodeCount = 0;
-                Count = 0;
-
-                for (int i = 0; i < Nodes.Length - 1; i++) Nodes[i].IndexA = i + 1;
-                Nodes[Nodes.Length - 1].IndexA = INTERVAL_TREE_NULL_NODE_INDEX;
-            }
-
-            public struct NodeT {
-                public int IndexA;
-                public int IndexB;
-                public int IndexParent;
-                public int Height;
-            }
-
-            public int Root;
-            public int Freelist;
-            public int NodeCapacity;
-            public int NodeCount;
-            public int Count;
-            public NodeT[] Nodes;
-            public Interval[] Intervals;
-            public T[] Items;
-        }
-
-        private struct PriorityQueue(int[] indices, float[] costs) {
-            public void Reset() {
-                _count = 0;
-            }
-            public void Push(int index, float cost) {
-                EnsureSizeOrDouble(ref _indices, _count);
-                EnsureSizeOrDouble(ref _costs, _count);
-
-                _indices[_count] = index;
-                _costs[_count] = cost;
-                ++_count;
-
-                int i = _count;
-                while (i > 1 && Predicate(i - 1, i / 2 - 1) > 0) {
-                    Swap(i - 1, i / 2 - 1);
-                    i /= 2;
-                }
-            }
-            public bool TryPop(ref int index, ref float cost) {
-                if (_count == 0) return false;
-                index = _indices[0];
-                cost = _costs[0];
-
-                _count--;
-                _indices[0] = _indices[_count];
-                _costs[0] = _costs[_count];
-
-                int u = 0;
-                int v = 1;
-                while (u != v) {
-                    u = v;
-                    if (2 * u + 1 <= _count) {
-                        if (Predicate(u - 1, 2 * u - 1) <= 0) v = 2 * u;
-                        if (Predicate(v - 1, 2 * u) <= 0) v = 2 * u + 1;
-                    } else if (2 * u <= _count) {
-                        if (Predicate(u - 1, 2 * u - 1) <= 0) v = 2 * u;
-                    }
-
-                    if (u != v) {
-                        Swap(u - 1, v - 1);
-                    }
-                }
-
-                return true;
-            }
-
-            private readonly int Predicate(int indexA, int indexB) {
-                float costA = _costs[indexA];
-                float costB = _costs[indexB];
-                return costA < costB ? -1 : costA > costB ? 1 : 0;
-            }
-            private readonly void Swap(int indexA, int indexB) {
-                (_indices[indexB], _indices[indexA]) = (_indices[indexA], _indices[indexB]);
-                (_costs[indexB], _costs[indexA]) = (_costs[indexA], _costs[indexB]);
-            }
-            private readonly void EnsureSizeOrDouble<K>(ref K[] array, int neededCapacity) {
-                if (array.Length < neededCapacity) {
-                    Array.Resize(ref array, array.Length * 2);
-                }
-            }
-
-            private int _count = 0;
-            private int[] _indices = indices;
-            private float[] _costs = costs;
-        }
-
-        private struct QueryInterval : IEnumerator<T>, IEnumerable<T> {
-            public QueryInterval(IntervalTree<T> at, Interval interval) {
-                _at = at;
-                _interval = interval;
-                if (_at._tree.Root != INTERVAL_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[INTERVAL_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
                 } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
+                    length1 = node1.Span.Length;
+                    // Either child 1 is the sibling or one of its descendants is.
+                    lowerCost1 = inheritedCost + directCost1 + MathF.Min(lengthD - length1, 0f);
                 }
-                _isStarted = false;
-                _version = _at._version;
+
+                float lowerCost2 = float.MaxValue;
+                float directCost2 = Span.Union(node2.Span, spanD).Length;
+                float length2 = 0f;
+                if (leaf2) {
+                    float cost2 = directCost2 + inheritedCost;
+                    if (cost2 < bestCost) {
+                        bestSibling = child2;
+                        bestCost = cost2;
+                    }
+                } else {
+                    length2 = node2.Span.Length;
+                    lowerCost2 = inheritedCost + directCost2 + MathF.Min(lengthD - length2, 0f);
+                }
+
+                if (leaf1 && leaf2) break;
+
+                // Can the cost possibly be decreased?
+                if (bestCost <= lowerCost1 && bestCost <= lowerCost2) break;
+
+                if (lowerCost1 == lowerCost2 && !leaf1) {
+                    // No clear choice, this happens when both children fully contain D. Fall back to the distance.
+                    lowerCost1 = MathF.Abs(node1.Span.Center - centerD);
+                    lowerCost2 = MathF.Abs(node2.Span.Center - centerD);
+                }
+
+                if (lowerCost1 < lowerCost2 && !leaf1) {
+                    index = child1;
+                    lengthBase = length1;
+                    directCost = directCost1;
+                } else {
+                    index = child2;
+                    lengthBase = length2;
+                    directCost = directCost2;
+                }
+            }
+
+            return bestSibling;
+        }
+
+        private void InsertLeaf(int leaf, Span span) {
+            Node leafNode = new() { Span = span, Index = leaf, Height = 0 };
+
+            if (_nodes[Root].Height == EmptyHeight) {
+                _nodes[Root] = leafNode;
+                _proxies[leaf].Node = Root;
+                return;
+            }
+
+            int sibling = FindBestSibling(span);
+
+            // The sibling moves down into a new pair beside the leaf and its old spot becomes their parent.
+            // Allocating can resize the arrays so it happens before reading them.
+            int pair = AllocatePair();
+            Node[] nodes = _nodes;
+            int[] parents = _parents;
+
+            nodes[pair] = nodes[sibling];
+            nodes[pair + 1] = leafNode;
+            parents[pair] = sibling;
+            parents[pair + 1] = sibling;
+            LinkChildren(pair);
+            _proxies[leaf].Node = pair + 1;
+
+            nodes[sibling] = MakeInternal(nodes, pair);
+
+            Rotate(sibling);
+            RefitAncestors(parents[sibling], rotate: true);
+        }
+
+        private void RemoveLeaf(int leaf) {
+            int index = _proxies[leaf].Node;
+            if (index == Root) {
+                _nodes[Root] = Node.Empty;
+                return;
+            }
+
+            // The sibling takes the parent's spot.
+            int parent = _parents[index];
+            _nodes[parent] = _nodes[index ^ 1];
+            LinkChildren(parent);
+            FreePair(index & ~1);
+
+            RefitAncestors(_parents[parent], rotate: false);
+        }
+
+        // Rotating while removing costs a lot more than it improves the tree.
+        private void RefitAncestors(int index, bool rotate) {
+            Node[] nodes = _nodes;
+            int[] parents = _parents;
+            while (index != NullNode) {
+                ref Node node = ref nodes[index];
+                Node refit = MakeInternal(nodes, node.Index);
+
+                // Nothing changes above this node.
+                if (refit.Height == node.Height && refit.Span.Equals(node.Span)) break;
+
+                node = refit;
+                if (rotate) Rotate(index);
+
+                index = parents[index];
+            }
+        }
+
+        // Swaps a child of A with a grandchild under the other child when that lowers the length of the tree.
+        //       A
+        //    /     \
+        //   B       C
+        //  / \     / \
+        // D   E   F   G
+        private void Rotate(int iA) {
+            Node[] nodes = _nodes;
+            ref Node a = ref nodes[iA];
+            if (a.Height < 2) return;
+
+            int iB = a.Index;
+            int iC = iB + 1;
+            ref Node b = ref nodes[iB];
+            ref Node c = ref nodes[iC];
+
+            int bestDown = NullNode;
+            int bestUp = NullNode;
+            float bestDelta = 0f;
+
+            if (c.Height > 0) {
+                int iF = c.Index;
+                int iG = iF + 1;
+                float lengthC = c.Span.Length;
+
+                // B <-> F then C (B G)
+                float deltaBF = Span.Union(b.Span, nodes[iG].Span).Length - lengthC;
+                if (deltaBF < bestDelta) {
+                    bestDown = iB;
+                    bestUp = iF;
+                    bestDelta = deltaBF;
+                }
+
+                // B <-> G then C (F B)
+                float deltaBG = Span.Union(b.Span, nodes[iF].Span).Length - lengthC;
+                if (deltaBG < bestDelta) {
+                    bestDown = iB;
+                    bestUp = iG;
+                    bestDelta = deltaBG;
+                }
+            }
+
+            if (b.Height > 0) {
+                int iD = b.Index;
+                int iE = iD + 1;
+                float lengthB = b.Span.Length;
+
+                // C <-> D then B (C E)
+                float deltaCD = Span.Union(c.Span, nodes[iE].Span).Length - lengthB;
+                if (deltaCD < bestDelta) {
+                    bestDown = iC;
+                    bestUp = iD;
+                    bestDelta = deltaCD;
+                }
+
+                // C <-> E then B (D C)
+                float deltaCE = Span.Union(c.Span, nodes[iD].Span).Length - lengthB;
+                if (deltaCE < bestDelta) {
+                    bestDown = iC;
+                    bestUp = iE;
+                }
+            }
+
+            if (bestDown == NullNode) return;
+
+            (nodes[bestDown], nodes[bestUp]) = (nodes[bestUp], nodes[bestDown]);
+            LinkChildren(bestDown);
+            LinkChildren(bestUp);
+
+            // The node that went down now sits under its old sibling, which needs a refit.
+            int sibling = bestDown ^ 1;
+            nodes[sibling] = MakeInternal(nodes, nodes[sibling].Index);
+            a.Height = 1 + Math.Max(nodes[iB].Height, nodes[iC].Height);
+        }
+
+        // Top down build that splits the leaves at the middle of their centers.
+        // The nodes are written in depth first order.
+        private void BuildTree(Node[] leaves, int[] order, float[] centers, int leafCount) {
+            Node[] nodes = _nodes;
+            _nodeEnd = 2;
+            _pairFreeList = NullNode;
+            nodes[Root + 1] = Node.Empty;
+
+            BuildItem[] stack = new BuildItem[64];
+            int top = 0;
+            stack[0] = new BuildItem {
+                NodeIndex = Root,
+                Pair = BumpPair(Root),
+                ChildCount = -1,
+                StartIndex = 0,
+                EndIndex = leafCount,
+                SplitIndex = PartitionMid(order, centers, 0, leafCount),
+            };
+
+            while (true) {
+                ref BuildItem item = ref stack[top];
+                item.ChildCount++;
+
+                if (item.ChildCount == 2) {
+                    // Both children are written, the node can be finalized.
+                    nodes[item.NodeIndex] = MakeInternal(nodes, item.Pair);
+                    if (top == 0) break;
+                    top--;
+                    continue;
+                }
+
+                int slot = item.ChildCount;
+                int startIndex = slot == 0 ? item.StartIndex : item.SplitIndex;
+                int endIndex = slot == 0 ? item.SplitIndex : item.EndIndex;
+                int nodeIndex = item.Pair + slot;
+
+                if (endIndex - startIndex == 1) {
+                    Node leaf = leaves[order[startIndex]];
+                    nodes[nodeIndex] = leaf;
+                    _proxies[leaf.Index].Node = nodeIndex;
+                    continue;
+                }
+
+                if (top + 1 == stack.Length) Array.Resize(ref stack, stack.Length * 2);
+                top++;
+                stack[top] = new BuildItem {
+                    NodeIndex = nodeIndex,
+                    Pair = BumpPair(nodeIndex),
+                    ChildCount = -1,
+                    StartIndex = startIndex,
+                    EndIndex = endIndex,
+                    SplitIndex = PartitionMid(order, centers, startIndex, endIndex),
+                };
+            }
+        }
+        private int BumpPair(int parent) {
+            int pair = _nodeEnd;
+            _nodeEnd += 2;
+            _parents[pair] = parent;
+            _parents[pair + 1] = parent;
+            return pair;
+        }
+        private static int PartitionMid(int[] order, float[] centers, int start, int end) {
+            int count = end - start;
+            if (count <= 2) return start + count / 2;
+
+            float min = centers[start];
+            float max = centers[start];
+            for (int i = start + 1; i < end; i++) {
+                min = MathF.Min(min, centers[i]);
+                max = MathF.Max(max, centers[i]);
+            }
+            float pivot = (min + max) * 0.5f;
+
+            // Hoare partition around the pivot.
+            int i1 = start;
+            int i2 = end;
+            while (i1 < i2) {
+                while (i1 < i2 && centers[i1] < pivot) i1++;
+                while (i1 < i2 && centers[i2 - 1] >= pivot) i2--;
+
+                if (i1 < i2) {
+                    (order[i1], order[i2 - 1]) = (order[i2 - 1], order[i1]);
+                    (centers[i1], centers[i2 - 1]) = (centers[i2 - 1], centers[i1]);
+                    i1++;
+                    i2--;
+                }
+            }
+
+            if (i1 > start && i1 < end) return i1;
+            return start + count / 2;
+        }
+
+        // The stacks are reused between searches to avoid allocations. Searches that run at the same time get their own.
+        private int[] RentStack() {
+            return Interlocked.Exchange(ref _stackCache, null) ?? new int[StackCapacity];
+        }
+        private void ReturnStack(int[] stack) {
+            _stackCache = stack;
+        }
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int[] GrowStack(int[] stack) {
+            int[] bigger = new int[stack.Length * 2];
+            stack.CopyTo(bigger, 0);
+            return bigger;
+        }
+
+        private void ThrowIfNotLeaf(int leaf) {
+            if ((uint)leaf >= (uint)_proxies.Length || _proxies[leaf].Node == NullNode) {
+                throw new ArgumentException($"{leaf} isn't a leaf in the tree.", nameof(leaf));
+            }
+        }
+        private void ThrowIfModified(int version) {
+            if (version != _version) {
+                throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
+            }
+        }
+
+        /// <summary>
+        /// Enumerates every item in the tree.
+        /// </summary>
+        public struct Enumerator : IEnumerator<T> {
+            internal Enumerator(IntervalTree<T> tree) {
+                _tree = tree;
+                _version = tree._version;
+                _index = -1;
                 _current = default;
             }
 
+            /// <inheritdoc/>
             public readonly T Current => _current!;
+            readonly object IEnumerator.Current => _current!;
 
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
-            }
-
-            public readonly void Dispose() { }
-
+            /// <inheritdoc/>
             public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
+                _tree.ThrowIfModified(_version);
 
-                _isStarted = true;
-
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-                    Interval searchInterval = _at._tree.Intervals[index];
-
-                    if (IntervalTree<T>.Collide(_interval, searchInterval)) {
-                        if (_at._tree.Nodes[index].IndexA == INTERVAL_TREE_NULL_NODE_INDEX) {
-                            _current = _at._tree.Items[index];
-                            return true;
-                        } else {
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
-                        }
+                Proxy[] proxies = _tree._proxies;
+                while (++_index < proxies.Length) {
+                    if (proxies[_index].Node != NullNode) {
+                        _current = _tree._items[_index];
+                        return true;
                     }
                 }
-                _isDone = true;
+
+                _index = proxies.Length;
                 _current = default;
                 return false;
             }
 
+            /// <inheritdoc/>
             public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
+                _tree.ThrowIfModified(_version);
+                _index = -1;
                 _current = default;
             }
 
-            public readonly IEnumerator<T> GetEnumerator() => this;
+            /// <inheritdoc/>
+            public readonly void Dispose() { }
+
+            private readonly IntervalTree<T> _tree;
+            private readonly int _version;
+            private int _index;
+            private T? _current;
+        }
+
+        /// <summary>
+        /// Enumerates the items overlapping an interval. Use it in a foreach loop.
+        /// </summary>
+        public struct QueryEnumerator : IEnumerator<T>, IEnumerable<T> {
+            internal QueryEnumerator(IntervalTree<T> tree, Span span) {
+                _tree = tree;
+                _span = span;
+                _version = tree._version;
+                _stack = null;
+                _sp = -1;
+                _current = default;
+            }
+
+            /// <inheritdoc/>
+            public readonly T Current => _current!;
+            readonly object IEnumerator.Current => _current!;
+
+            /// <inheritdoc/>
+            public bool MoveNext() {
+                _tree.ThrowIfModified(_version);
+                if (_sp < 0) Start();
+
+                // Everything on the stack overlaps the span.
+                ref Node nodes = ref MemoryMarshal.GetArrayDataReference(_tree._nodes);
+                int[] stack = _stack!;
+                int sp = _sp;
+                while (sp > 0) {
+                    int index = stack[--sp];
+                    ref Node node = ref Unsafe.Add(ref nodes, index);
+
+                    if (node.Height == 0) {
+                        _sp = sp;
+                        _current = _tree._items[node.Index];
+                        return true;
+                    }
+
+                    if (sp + 2 > stack.Length) _stack = stack = GrowStack(stack);
+                    int pair = node.Index;
+                    ref Node child1 = ref Unsafe.Add(ref nodes, pair);
+                    ref Node child2 = ref Unsafe.Add(ref child1, 1);
+                    if (child1.Span.Overlaps(_span)) stack[sp++] = pair;
+                    if (child2.Span.Overlaps(_span)) stack[sp++] = pair + 1;
+                }
+
+                _sp = 0;
+                _current = default;
+                return false;
+            }
+            private void Start() {
+                _stack = _tree.RentStack();
+                _sp = 0;
+                if (_tree._nodes[Root].Span.Overlaps(_span)) _stack[_sp++] = Root;
+            }
+
+            /// <inheritdoc/>
+            public void Reset() {
+                _tree.ThrowIfModified(_version);
+                Dispose();
+                _sp = -1;
+            }
+
+            /// <inheritdoc/>
+            public void Dispose() {
+                if (_stack != null) {
+                    _tree.ReturnStack(_stack);
+                    _stack = null;
+                }
+                _current = default;
+            }
+
+            /// <summary>
+            /// Returns this enumerator so that it can be used in a foreach loop.
+            /// </summary>
+            public readonly QueryEnumerator GetEnumerator() => this;
+            readonly IEnumerator<T> IEnumerable<T>.GetEnumerator() => this;
             readonly IEnumerator IEnumerable.GetEnumerator() => this;
 
-            private readonly IntervalTree<T> _at;
-            private Interval _interval;
-            private readonly int[] _indexStack;
+            private readonly IntervalTree<T> _tree;
+            private readonly Span _span;
+            private readonly int _version;
+            private int[]? _stack;
             private int _sp;
             private T? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
-        }
-        private struct QueryAll : IEnumerator<T>, IEnumerable<T> {
-            public QueryAll(IntervalTree<T> at) {
-                _at = at;
-                if (_at._tree.Root != INTERVAL_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[INTERVAL_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
-                } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
-                }
-                _isStarted = false;
-                _version = _at._version;
-                _current = default;
-            }
-
-            public readonly T Current => _current!;
-
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
-            }
-
-            public readonly void Dispose() { }
-
-            public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _isStarted = true;
-
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-
-                    if (_at._tree.Nodes[index].IndexA == INTERVAL_TREE_NULL_NODE_INDEX) {
-                        _current = _at._tree.Items[index];
-                        return true;
-                    } else {
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
-                    }
-                }
-                _isDone = true;
-                _current = default;
-                return false;
-            }
-
-            public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
-                _current = default;
-            }
-
-            public readonly IEnumerator<T> GetEnumerator() => this;
-            readonly IEnumerator IEnumerable.GetEnumerator() => this;
-
-            private readonly IntervalTree<T> _at;
-            private readonly int[] _indexStack;
-            private int _sp;
-            private T? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
-        }
-        private struct QueryNodes : IEnumerator<Interval>, IEnumerable<Interval> {
-            public QueryNodes(IntervalTree<T> at, Interval interval) {
-                _at = at;
-                _Interval = interval;
-                if (_at._tree.Root != INTERVAL_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[INTERVAL_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
-                } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
-                }
-                _isStarted = false;
-                _version = _at._version;
-                _current = default;
-            }
-
-            public Interval Current => _current!.Value;
-
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
-            }
-
-            public readonly void Dispose() { }
-
-            public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _isStarted = true;
-
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-                    Interval searchInterval = _at._tree.Intervals[index];
-
-                    if (IntervalTree<T>.Collide(_Interval, searchInterval)) {
-                        if (_at._tree.Nodes[index].IndexA == INTERVAL_TREE_NULL_NODE_INDEX) {
-                            _current = _at._tree.Intervals[index];
-                            return true;
-                        } else {
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                            _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
-                            _current = _at._tree.Intervals[index];
-                            return true;
-                        }
-                    }
-                }
-                _isDone = true;
-                _current = default;
-                return false;
-            }
-
-            public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
-                _current = default;
-            }
-
-            public readonly IEnumerator<Interval> GetEnumerator() => this;
-            readonly IEnumerator IEnumerable.GetEnumerator() => this;
-
-            private readonly IntervalTree<T> _at;
-            private Interval _Interval;
-            private readonly int[] _indexStack;
-            private int _sp;
-            private Interval? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
-        }
-        private struct QueryAllNodes : IEnumerator<Interval>, IEnumerable<Interval> {
-            public QueryAllNodes(IntervalTree<T> at) {
-                _at = at;
-                if (_at._tree.Root != INTERVAL_TREE_NULL_NODE_INDEX) {
-                    _indexStack = new int[INTERVAL_TREE_STACK_QUERY_CAPACITY];
-                    _sp = 1;
-                    _indexStack[0] = _at._tree.Root;
-                    _isDone = false;
-                } else {
-                    _indexStack = null!;
-                    _sp = 0;
-                    _isDone = true;
-                }
-                _isStarted = false;
-                _version = _at._version;
-                _current = default;
-            }
-
-            public Interval Current => _current!.Value;
-
-            readonly object IEnumerator.Current {
-                get {
-                    if (!_isStarted || _isDone) {
-                        throw new InvalidOperationException("Enumeration has either not started or has already finished.");
-                    }
-                    return _current!;
-                }
-            }
-
-            public readonly void Dispose() { }
-
-            public bool MoveNext() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _isStarted = true;
-
-                while (_sp > 0) {
-                    int index = _indexStack[--_sp];
-
-                    if (_at._tree.Nodes[index].IndexA == INTERVAL_TREE_NULL_NODE_INDEX) {
-                        _current = _at._tree.Intervals[index];
-                        return true;
-                    } else {
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexA;
-                        _indexStack[_sp++] = _at._tree.Nodes[index].IndexB;
-                        _current = _at._tree.Intervals[index];
-                        return true;
-                    }
-                }
-                _isDone = true;
-                _current = default;
-                return false;
-            }
-
-            public void Reset() {
-                if (_version != _at._version) {
-                    throw new InvalidOperationException("Collection was modified after the enumerator was instantiated.");
-                }
-
-                _sp = 1;
-                _isDone = false;
-                _isStarted = false;
-                _current = default;
-            }
-
-            public readonly IEnumerator<Interval> GetEnumerator() => this;
-            readonly IEnumerator IEnumerable.GetEnumerator() => this;
-
-            private readonly IntervalTree<T> _at;
-            private readonly int[] _indexStack;
-            private int _sp;
-            private Interval? _current;
-            private bool _isDone;
-            private bool _isStarted;
-            private readonly int _version;
         }
 
-        private float _intervalTreeExpandConstant = expandConstant;
-        private float _intervalTreeMoveConstant = moveConstant;
+        internal struct Span(float min, float max) : IEquatable<Span> {
+            public float Min = min;
+            public float Max = max;
 
-        private const int INTERVAL_TREE_STACK_QUERY_CAPACITY = 256;
-        private const int INTERVAL_TREE_NULL_NODE_INDEX = -1;
+            public readonly float Length {
+                [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                get => Max - Min;
+            }
+            public readonly float Center => (Min + Max) * 0.5f;
 
-        private IntervalTreeT _tree = new(initialCapacity);
-        private PriorityQueue _queue = new(new int[INTERVAL_TREE_STACK_QUERY_CAPACITY], new float[INTERVAL_TREE_STACK_QUERY_CAPACITY]);
+            public static Span From(Interval interval) => new(interval.X, interval.X + interval.Length);
+            public readonly Interval ToInterval() => new(Min, Max - Min);
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly Span Expand(float v) => new(Min - v, Max + v);
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public static Span Union(in Span a, in Span b) => new(MathF.Min(a.Min, b.Min), MathF.Max(a.Max, b.Max));
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly bool Contains(in Span b) => Min <= b.Min && b.Max <= Max;
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public readonly bool Overlaps(in Span b) => Min <= b.Max && b.Min <= Max;
+
+            public readonly bool Equals(Span b) => Min == b.Min && Max == b.Max;
+            public override readonly bool Equals(object? obj) => obj is Span b && Equals(b);
+            public override readonly int GetHashCode() => HashCode.Combine(Min, Max);
+        }
+
+        private struct Node {
+            public Span Span;
+            // The leaf for leafs, the first child of the pair for internal nodes.
+            public int Index;
+            // 0 for leafs, -1 for empty nodes.
+            public int Height;
+
+            public static readonly Node Empty = new() {
+                Span = new Span(float.PositiveInfinity, float.NegativeInfinity),
+                Index = NullNode,
+                Height = EmptyHeight,
+            };
+        }
+
+        private struct Proxy {
+            // Where the leaf is in the nodes, -1 when the leaf is free.
+            public int Node;
+            public int Next;
+        }
+
+        private struct BuildItem {
+            public int NodeIndex;
+            public int Pair;
+            public int ChildCount;
+            public int StartIndex;
+            public int SplitIndex;
+            public int EndIndex;
+        }
+
+        private float _expandConstant;
+        private float _moveConstant;
+
+        private const int StackCapacity = 64;
+        private const int NullNode = -1;
+        private const int EmptyHeight = -1;
+        private const int Root = 0;
+
+        private Node[] _nodes = null!;
+        private int[] _parents = null!;
+        private int _nodeEnd;
+        private int _pairFreeList;
+
+        private Proxy[] _proxies = null!;
+        private T[] _items = null!;
+        private int _proxyFreeList;
+
+        private int _count;
         private int _version = 0;
+        private int[]? _stackCache;
+        private readonly Dictionary<T, int> _leaves = [];
     }
 }
