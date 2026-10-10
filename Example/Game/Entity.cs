@@ -1,35 +1,19 @@
-using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
-using MonoGame.Extended;
+using Microsoft.Xna.Framework;
 
 namespace GameProject {
-    public class Entity : IEqualityComparer<Entity> {
-        public Entity(uint id, RectangleF r) {
+    public class Entity {
+        public Entity(uint id, Vector2 xy, Vector2 size, Vector2 velocity) {
             _id = id;
-            _rect = r;
+            XY = xy;
+            Size = size;
+            Velocity = velocity;
         }
 
         public uint Id => _id;
-        public RectangleF Rect {
-            get => _rect;
-            set {
-                _rect = value;
-            }
-        }
-        public int Leaf {
-            get;
-            set;
-        }
+        public Vector2 XY { get; set; }
+        public Vector2 Size { get; set; }
+        public Vector2 Velocity { get; set; }
 
-        public bool Equals([AllowNull] Entity x, [AllowNull] Entity y) {
-            return x.Id == y.Id;
-        }
-
-        public int GetHashCode([DisallowNull] Entity obj) {
-            return obj.Id.GetHashCode();
-        }
-
-        uint _id;
-        RectangleF _rect;
+        readonly uint _id;
     }
 }
